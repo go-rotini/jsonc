@@ -1,6 +1,6 @@
 # go-rotini/jsonc
 
-A Go JSONC (JSON with Comments) encoding and decoding package, JWCC-compatible (line + block comments, optional trailing commas), positioned as a drop-in replacement for [`encoding/json`](https://pkg.go.dev/encoding/json) backed by the [JSONTestSuite](https://github.com/nst/JSONTestSuite) conformance fixtures.
+A Go JSONC encoding and decoding package that implements the [JSONC specification](https://jsonc.org/), is JWCC-compatible (line + block comments, optional trailing commas), and is backed by the [JSON Test Suite](https://github.com/nst/JSONTestSuite) conformance tests as a drop-in alternative for [`encoding/json`](https://pkg.go.dev/encoding/json).
 
 This package is used as the default JSONC support package for [rotini](https://github.com/go-rotini/rotini).
 
