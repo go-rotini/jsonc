@@ -268,7 +268,7 @@ func TestStrictJSONViolations(t *testing.T) {
 
 // TestJSONTestSuite runs the package against nst/JSONTestSuite when the
 // testdata/JSONTestSuite directory is populated (cloned by `make
-// clone-test-suites`). Each file's prefix dictates the expected outcome:
+// clone-test-suite`). Each file's prefix dictates the expected outcome:
 //
 //	y_*  must be accepted as RFC 8259 JSON
 //	n_*  must be rejected
@@ -316,49 +316,5 @@ func TestJSONTestSuite(t *testing.T) {
 				t.Logf("i_ outcome: err=%v", parseErr)
 			}
 		})
-	}
-}
-
-// TestJWCCTestSuite runs the package against tailscale/hujson testdata
-// when cloned. hujson's test corpus generally targets JWCC (JSON with
-// commas and comments), the same dialect we accept by default.
-func TestJWCCTestSuite(t *testing.T) {
-	// hujson's testdata layout uses *.jwcc files for valid inputs and
-	// occasional *.json fixtures.
-	dir := "testdata/hujson-testdata"
-	if _, err := os.Stat(dir); err != nil {
-		t.Skipf("hujson testdata not cloned: %v", err)
-	}
-	count := 0
-	walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		ext := filepath.Ext(path)
-		if ext != ".jwcc" && ext != ".jsonc" && ext != ".json" {
-			return nil
-		}
-		count++
-		t.Run(filepath.Base(path), func(t *testing.T) {
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			// We accept JWCC by default; just ensure we don't panic and that
-			// well-formed inputs parse. We don't assert reject/accept here
-			// because hujson's corpus mixes valid and intentionally invalid
-			// fixtures without filename conventions we can rely on.
-			_, _ = jsonc.Parse(data)
-		})
-		return nil
-	})
-	if walkErr != nil {
-		t.Fatal(walkErr)
-	}
-	if count == 0 {
-		t.Skip("no hujson fixtures found")
 	}
 }

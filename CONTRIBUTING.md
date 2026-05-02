@@ -30,7 +30,7 @@ make lint
 make test              # run tests
 make test-acceptance   # run JSONC acceptance tests verifying encoding/decoding behavior
 make test-bench        # run benchmarks
-make test-conformance  # run JSONTestSuite and HuJSON conformance tests
+make test-conformance  # run JSONTestSuite conformance tests
 make test-fuzz         # run fuzz tests (60s per fuzzer)
 make test-mutation     # run mutation tests
 make test-race         # run tests with race detector

@@ -66,7 +66,7 @@ Initial release of the `go-rotini/jsonc` package — a Go JSONC (JSON with Comme
 ### Testing
 - Six fuzz targets: `FuzzUnmarshal`, `FuzzScanner`, `FuzzValid`, `FuzzRoundTrip`, `FuzzFormat`, `FuzzMinimize`.
 - Acceptance fixtures: tsconfig.json, vscode-settings.json, kitchen-sink.jsonc.
-- JSONTestSuite and hujson conformance harness (gated on cloned testdata).
+- JSONTestSuite conformance harness (gated on cloned testdata; clones the latest of `master` via `make clone-test-suite`, matching the yaml/toml-package pattern of tracking the upstream test suite head).
 - Stdlib compatibility tests verifying parity with `encoding/json` for the standard JSON subset.
 - 14 runnable Examples for godoc rendering.
 

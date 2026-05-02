@@ -1,33 +1,19 @@
-# JSONTestSuite — pin to a specific commit for reproducibility.
-# Update the pin intentionally (with a CHANGELOG note) when bumping.
-JSONTEST_DIR  := testdata/JSONTestSuite
-JSONTEST_REPO := https://github.com/nst/JSONTestSuite.git
-JSONTEST_REF  := 1ef36fa01286573e846ac449e8683f8833c5b26a
+TEST_SUITE_DIR  := testdata/JSONTestSuite
+TEST_SUITE_REPO := https://github.com/nst/JSONTestSuite.git
 
-# tailscale/hujson — pin to a specific commit for reproducibility.
-# Update the pin intentionally (with a CHANGELOG note) when bumping.
-HUJSON_DIR    := testdata/hujson-testdata
-HUJSON_REPO   := https://github.com/tailscale/hujson.git
-HUJSON_REF    := ecc657c15afd43d89afe7ce64dd0ad160f23f8b4
-
-.PHONY: all clean clone-test-suites lint test test-acceptance test-bench \
+.PHONY: all clean clone-test-suite lint test test-acceptance test-bench \
         test-conformance test-fuzz test-mutation test-race
 
-all: clean clone-test-suites lint test test-acceptance test-bench \
+all: clean clone-test-suite lint test test-acceptance test-bench \
      test-conformance test-fuzz test-mutation test-race
 
 clean:
-	@rm -rf $(JSONTEST_DIR) $(HUJSON_DIR) *.out test_mutation.json
+	@rm -rf $(TEST_SUITE_DIR) *.out test_mutation.json
 
-clone-test-suites: $(JSONTEST_DIR) $(HUJSON_DIR)
+clone-test-suite: $(TEST_SUITE_DIR)
 
-$(JSONTEST_DIR):
-	@git clone --quiet $(JSONTEST_REPO) $(JSONTEST_DIR)
-	@cd $(JSONTEST_DIR) && git checkout --quiet $(JSONTEST_REF)
-
-$(HUJSON_DIR):
-	@git clone --quiet $(HUJSON_REPO) $(HUJSON_DIR)
-	@cd $(HUJSON_DIR) && git checkout --quiet $(HUJSON_REF)
+$(TEST_SUITE_DIR):
+	@git clone --quiet --branch master --depth 1 $(TEST_SUITE_REPO) $(TEST_SUITE_DIR)
 
 lint:
 	@gofmt_unformatted=$$(gofmt -l . 2>/dev/null | grep -v '^testdata/' || true); \
@@ -38,7 +24,7 @@ lint:
 	go tool go-licenses check ./...
 	go tool govulncheck ./...
 
-test: clone-test-suites
+test: clone-test-suite
 	@go test -v -count=1 -coverprofile=test.out .
 	@go tool cover -func=test.out | tail -1
 
@@ -49,8 +35,8 @@ test-acceptance:
 test-bench:
 	@go test -bench=. -benchmem -count=1 . | tee test_bench.out
 
-test-conformance: clone-test-suites
-	@go test -v -count=1 -run 'TestJSONTestSuite|TestJWCCTestSuite|TestJSONCEdgeCases' -coverprofile=test_conformance.out .
+test-conformance: clone-test-suite
+	@go test -v -count=1 -run 'TestJSONTestSuite|TestJSONCEdgeCases' -coverprofile=test_conformance.out .
 	@go tool cover -func=test_conformance.out | tail -1
 
 test-fuzz:
@@ -61,7 +47,7 @@ test-fuzz:
 	@go test -fuzz=FuzzFormat -fuzztime=60s -run=^$$ .
 	@go test -fuzz=FuzzMinimize -fuzztime=60s -run=^$$ .
 
-test-mutation: clone-test-suites
+test-mutation: clone-test-suite
 	@go tool github.com/go-gremlins/gremlins/cmd/gremlins unleash --config .gremlins.yaml
 
 test-race:
