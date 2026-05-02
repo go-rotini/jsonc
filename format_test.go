@@ -110,3 +110,38 @@ func TestFormatInvalidInput(t *testing.T) {
 		t.Fatal("expected error on invalid input")
 	}
 }
+
+// TestFormatCommentWithEmbeddedNewline pins a regression discovered by
+// FuzzFormat: a trailing block comment whose CR was normalized to LF gets
+// captured as the value's inline comment. Naively re-emitting it as
+// `// <text>` would leak the text past the comment and corrupt the
+// document. The encoder must fall back to /* … */ form.
+func TestFormatCommentWithEmbeddedNewline(t *testing.T) {
+	in := []byte("{}/*\r0*/")
+	out, err := Format(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Output must round-trip through Parse without any "extra data" complaint.
+	if _, err := Parse(out); err != nil {
+		t.Errorf("Format output not re-parseable: %v\nout=%q", err, out)
+	}
+}
+
+// TestFormatCommentWithStarSlashSequence pins the defense against `*/`
+// appearing inside text that the encoder must wrap in /* … */. We can't
+// produce this through the parser (the scanner stops at the first */), but
+// it is reachable via WithComment user input — exercised in the encoder
+// suite. This test just confirms Format is stable for the parser-source
+// case where a block comment's value already cannot contain */ but the
+// trailing-content path still produces sane output.
+func TestFormatTrailingBlockCommentRoundTrip(t *testing.T) {
+	in := []byte(`{"a": 1} /* trailing */`)
+	out, err := Format(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(out); err != nil {
+		t.Errorf("not re-parseable: %v\nout=%q", err, out)
+	}
+}

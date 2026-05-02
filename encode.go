@@ -121,8 +121,7 @@ func (e *encoder) writeNode(n *node, depth int) {
 	// Inline comment (on the same line, after the node value) — multi-line
 	// only.
 	if n.comment != "" && e.multiline() && !e.opts.strictJSONOutput {
-		e.buf.WriteString(" // ")
-		e.buf.WriteString(n.comment)
+		e.writeInlineComment(n.comment)
 	}
 }
 
@@ -275,14 +274,51 @@ func (e *encoder) writeIndent(depth int) {
 }
 
 // writeCommentBlock emits a (possibly multi-line) comment block at the
-// given depth. Each non-empty line is prefixed with "// ".
+// given depth. Each non-empty line is prefixed with "// ". Line endings
+// (\r, \r\n, \n) are normalized so embedded CRs do not prematurely
+// terminate the // comment scope.
 func (e *encoder) writeCommentBlock(text string, depth int) {
-	for line := range strings.SplitSeq(text, "\n") {
+	for line := range strings.SplitSeq(normalizeLineEndings(text), "\n") {
 		e.writeIndent(depth)
 		e.buf.WriteString("// ")
 		e.buf.WriteString(line)
 		e.buf.WriteByte('\n')
 	}
+}
+
+// writeInlineComment emits an inline comment after a value on the same
+// line. If the text contains a newline (or a CR — which would also
+// terminate a // comment), it falls back to the /* … */ form so the
+// comment does not leak past its intended position.
+func (e *encoder) writeInlineComment(text string) {
+	if strings.ContainsAny(text, "\n\r") {
+		e.buf.WriteString(" /* ")
+		e.buf.WriteString(sanitizeBlockCommentText(text))
+		e.buf.WriteString(" */")
+		return
+	}
+	e.buf.WriteString(" // ")
+	e.buf.WriteString(text)
+}
+
+// normalizeLineEndings collapses \r\n and bare \r to \n so callers can
+// split on '\n' alone.
+func normalizeLineEndings(text string) string {
+	if !strings.ContainsRune(text, '\r') {
+		return text
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	return strings.ReplaceAll(text, "\r", "\n")
+}
+
+// sanitizeBlockCommentText defangs any "*/" sequence in the text so it
+// cannot prematurely terminate the surrounding /* … */ block. The
+// substitution preserves visual intent: "*/" → "* /". Idempotent.
+func sanitizeBlockCommentText(text string) string {
+	if !strings.Contains(text, "*/") {
+		return text
+	}
+	return strings.ReplaceAll(text, "*/", "* /")
 }
 
 // writeOrphanComment emits a CommentNode at the given depth.
@@ -291,13 +327,16 @@ func (e *encoder) writeOrphanComment(n *node, depth int) {
 	case styleBlockComment:
 		e.writeIndent(depth)
 		e.buf.WriteString("/*")
-		e.buf.WriteString(n.value)
+		e.buf.WriteString(sanitizeBlockCommentText(n.value))
 		e.buf.WriteString("*/")
 		e.buf.WriteByte('\n')
 	default: // line
 		e.writeIndent(depth)
 		e.buf.WriteString("//")
-		e.buf.WriteString(n.value)
+		// Defensive: a line-comment value should not contain line
+		// terminators (the scanner stops at them), but normalize to keep
+		// the output safe under all conditions.
+		e.buf.WriteString(strings.ReplaceAll(normalizeLineEndings(n.value), "\n", " "))
 		e.buf.WriteByte('\n')
 	}
 }
@@ -407,18 +446,13 @@ func (e *encoder) commentsAt(pos CommentPosition) []Comment {
 	return out
 }
 
-// emitInlineComments appends each Comment as ` // text` directly to the buf,
-// joining when multiple comments share a position. No newline is emitted.
+// emitInlineComments appends each Comment after a value on the same line.
+// Each comment uses the `//` form when single-line and switches to
+// `/* … */` when its text contains a newline or carriage return, so
+// embedded line terminators do not leak past the value.
 func (e *encoder) emitInlineComments(comments []Comment) {
 	for _, c := range comments {
-		e.buf.WriteString(" // ")
-		// Only the first line of multi-line text fits inline; subsequent
-		// lines fall back to the comment-block form on their own line.
-		if i := strings.IndexByte(c.Text, '\n'); i >= 0 {
-			e.buf.WriteString(c.Text[:i])
-		} else {
-			e.buf.WriteString(c.Text)
-		}
+		e.writeInlineComment(c.Text)
 	}
 }
 
