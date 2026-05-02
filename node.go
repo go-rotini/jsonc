@@ -72,6 +72,31 @@ const (
 	CommentNode                  // an orphan comment
 )
 
+// String returns the lowercase JSON-ish name of the node kind, used in
+// error messages and debugging output.
+func (k NodeKind) String() string {
+	switch k {
+	case ObjectNode:
+		return "object"
+	case ArrayNode:
+		return "array"
+	case KeyValueNode:
+		return "key-value"
+	case StringNode:
+		return "string"
+	case NumberNode:
+		return "number"
+	case BooleanNode:
+		return "boolean"
+	case NullNode:
+		return "null"
+	case CommentNode:
+		return "comment"
+	default:
+		return fmt.Sprintf("NodeKind(%d)", int(k))
+	}
+}
+
 // CommentStyle indicates whether a comment was written as a // line comment
 // or a /* */ block comment in the original source.
 type CommentStyle int
