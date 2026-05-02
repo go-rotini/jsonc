@@ -131,7 +131,6 @@ func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 		return err
 	}
 
-	// Find the start of the next value (skip leading whitespace/comments).
 	startOffset, err := dec.findValueStart()
 	if err != nil {
 		return err
@@ -140,8 +139,6 @@ func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 		return io.EOF
 	}
 
-	// Try to parse a value from the loaded buffer. If the parser succeeds
-	// without "extra data" complaint, advance past the consumed portion.
 	endOffset, err := dec.parseOneValue(ctx, startOffset, v)
 	if err != nil {
 		return err
@@ -173,9 +170,7 @@ func (dec *Decoder) SetContext(ctx context.Context) {
 	dec.ctx = ctx
 }
 
-// ensureLoaded reads the entire input into dec.buf on first call. (Phase
-// 6 implementation: simple slurp-and-parse. A streaming-token approach is
-// possible but not required for v0.1.)
+// ensureLoaded reads the entire input into dec.buf on first call.
 func (dec *Decoder) ensureLoaded() error {
 	if dec.loaded {
 		return nil
@@ -198,9 +193,6 @@ func (dec *Decoder) findValueStart() (int, error) {
 	if len(tail) == 0 {
 		return -1, nil
 	}
-	// Scan from the consumed offset to find the first byte that begins a value.
-	// We do this by feeding a scanner over the tail and watching for the first
-	// non-whitespace, non-comment, non-newline token.
 	sc, err := newScanner(tail)
 	if err != nil {
 		return -1, err
@@ -228,10 +220,8 @@ func (dec *Decoder) findValueStart() (int, error) {
 // the value are NOT consumed — they may belong to the next value or be
 // part of the document's footer.
 func (dec *Decoder) parseOneValue(ctx context.Context, offset int, v any) (int, error) {
-	// Build a bounded sub-document containing the value plus enough trailing
-	// content for the parser to know where the value ends. We re-use the
-	// general parser but ignore the "extra data" check by parsing from an
-	// internal entry point.
+	// Re-use the general parser via parseSingleValue, which skips the
+	// "extra data after value" check that one-shot Unmarshal enforces.
 	tail := dec.buf[offset:]
 
 	o := *dec.opts
@@ -287,9 +277,6 @@ func parseSingleValue(data []byte, opts *decoderOptions) (*node, int, error) {
 		return nil, 0, err
 	}
 
-	// Run a streaming-friendly parse: skip leading trivia, parse one value,
-	// then return the byte offset of the token immediately following the
-	// value.
 	p := newParser(tokens, opts).withData(data)
 	p.consumeIfKind(tokenStreamStart)
 	leadHead := p.collectHeadComments()
@@ -305,21 +292,17 @@ func parseSingleValue(data []byte, opts *decoderOptions) (*node, int, error) {
 		root.headComment = appendCommentBlock(leadHead, root.headComment)
 	}
 
-	// Find the byte offset of the next token (or EOF) after the value.
 	if p.pos < len(p.tokens) {
 		nextTok := p.tokens[p.pos]
 		if nextTok.kind == tokenEOF {
 			return root, len(data), nil
 		}
-		// Inline comment after the value belongs to it; subtract it from the
-		// "next value start" so the next Decode call can find it as trivia.
 		return root, nextTok.pos.Offset, nil
 	}
 	return root, len(data), nil
 }
 
-// Common error checks for v: re-export the stdlib-style error for callers
-// who want a consistent type. (errors.Is(err, ErrNilPointer) works.)
+// Pin errors.Is in the import set so the docs that reference it stay valid.
 var _ = errors.Is
 
 // Compile-time guards: RawValue satisfies the byte-marshaler interfaces so

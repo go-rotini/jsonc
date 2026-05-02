@@ -58,7 +58,6 @@ func PathString(expr string) (Path, error) {
 	if src == "" {
 		return p, fmt.Errorf("%w: empty expression", ErrPathSyntax)
 	}
-	// Optional leading $.
 	if src[0] == '$' {
 		src = src[1:]
 	}
@@ -86,9 +85,8 @@ func parsePathSegment(s string) (pathSegment, string, error) {
 	}
 }
 
-// parseDotSegment parses ".name" or "..name".
+// parseDotSegment parses ".name" or "..name". Caller has confirmed s[0] == '.'.
 func parseDotSegment(s string) (pathSegment, string, error) {
-	// Already know s[0] == '.'.
 	recursive := false
 	if len(s) >= 2 && s[1] == '.' {
 		recursive = true
@@ -96,7 +94,6 @@ func parseDotSegment(s string) (pathSegment, string, error) {
 	} else {
 		s = s[1:]
 	}
-	// Read identifier characters until next . [ or end.
 	end := len(s)
 	for i := range len(s) {
 		if s[i] == '.' || s[i] == '[' {
@@ -116,8 +113,8 @@ func parseDotSegment(s string) (pathSegment, string, error) {
 }
 
 // parseBracketSegment parses "[...]" forms: [N], [*], ["name"], ['name'].
+// Caller has confirmed s[0] == '['.
 func parseBracketSegment(s string) (pathSegment, string, error) {
-	// Already know s[0] == '['.
 	closeIdx := strings.IndexByte(s, ']')
 	if closeIdx < 0 {
 		return pathSegment{}, "", fmt.Errorf("%w: missing ]", ErrPathSyntax)
@@ -131,7 +128,6 @@ func parseBracketSegment(s string) (pathSegment, string, error) {
 	if len(inner) >= 2 && (inner[0] == '"' || inner[0] == '\'') && inner[len(inner)-1] == inner[0] {
 		return pathSegment{kind: segChild, name: inner[1 : len(inner)-1]}, rest, nil
 	}
-	// Numeric index.
 	idx, err := strconv.Atoi(inner)
 	if err != nil || idx < 0 {
 		return pathSegment{}, "", fmt.Errorf("%w: invalid bracket %q", ErrPathSyntax, inner)
@@ -293,8 +289,8 @@ func (p Path) Delete(root *Node) error {
 		return ErrPathNotFound
 	}
 	parents := mapNodeParents(root)
-	// Process in reverse so index shifts don't disturb earlier deletes
-	// when multiple matches share a parent.
+	// Reverse iteration so index shifts from earlier deletes don't invalidate
+	// later ones when multiple matches share a parent.
 	for i, target := range slices.Backward(matches) {
 		_ = i
 		parent, idx := findChild(parents, target)
@@ -313,8 +309,10 @@ func applySegment(cur []*Node, seg pathSegment) []*Node {
 		switch seg.kind {
 		case segChild:
 			next = append(next, childByName(n, seg.name)...)
+			// JSON Pointer leaves array-vs-object resolution to the document.
+			// If the node is an array and the segment name parses as a
+			// non-negative integer, treat it as an index.
 			if len(next) == 0 && n.Kind == ArrayNode {
-				// JSON Pointer: numeric token applied to array.
 				if i := seg.indexFromName(); i >= 0 && i < len(n.Children) {
 					next = append(next, n.Children[i])
 				}

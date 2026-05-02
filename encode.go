@@ -91,7 +91,6 @@ func (e *encoder) writeNode(n *node, depth int) {
 	case nodeArray:
 		e.writeArray(n, depth)
 	case nodeKeyValue:
-		// Only used as a child of nodeObject; emit "key": value.
 		e.writeQuotedString(n.key)
 		e.buf.WriteString(": ")
 		if len(n.children) > 0 {
@@ -112,14 +111,11 @@ func (e *encoder) writeNode(n *node, depth int) {
 			e.buf.WriteString(n.value)
 		}
 	case nodeComment:
-		// Orphan comment — emit verbatim if multi-line allowed.
 		if !e.opts.strictJSONOutput {
 			e.writeOrphanComment(n, depth)
 		}
 	}
 
-	// Inline comment (on the same line, after the node value) — multi-line
-	// only.
 	if n.comment != "" && e.multiline() && !e.opts.strictJSONOutput {
 		e.writeInlineComment(n.comment)
 	}
@@ -139,8 +135,9 @@ func (e *encoder) writeObjectCompact(n *node) {
 	e.buf.WriteByte('{')
 	first := true
 	for _, child := range n.children {
+		// Comments are dropped in compact output regardless of options.
 		if child.kind == nodeComment {
-			continue // dropped in compact mode
+			continue
 		}
 		if !first {
 			e.buf.WriteByte(',')
@@ -160,8 +157,9 @@ func (e *encoder) writeObjectMultiline(n *node, depth int) {
 	e.buf.WriteByte('{')
 	e.buf.WriteByte('\n')
 
-	// Filter comment children apart from value children for trailing-comma
-	// handling.
+	// Count value-bearing members up front so trailing-comma logic can
+	// distinguish "last member" from "last child" (CommentNode siblings
+	// don't count).
 	memberCount := 0
 	for _, child := range n.children {
 		if child.kind != nodeComment {
@@ -177,7 +175,6 @@ func (e *encoder) writeObjectMultiline(n *node, depth int) {
 			}
 			continue
 		}
-		// Head comment of the child is emitted by writeNode.
 		e.writeIndent(depth + 1)
 		e.writeNode(child, depth+1)
 		emittedMembers++
@@ -330,12 +327,13 @@ func (e *encoder) writeOrphanComment(n *node, depth int) {
 		e.buf.WriteString(sanitizeBlockCommentText(n.value))
 		e.buf.WriteString("*/")
 		e.buf.WriteByte('\n')
-	default: // line
+	default:
 		e.writeIndent(depth)
 		e.buf.WriteString("//")
-		// Defensive: a line-comment value should not contain line
-		// terminators (the scanner stops at them), but normalize to keep
-		// the output safe under all conditions.
+		// The scanner stops a line comment at any line terminator, so the
+		// stored value should not contain one. Normalize anyway so a
+		// programmatically constructed Node cannot leak a newline that
+		// would close the comment scope mid-token.
 		e.buf.WriteString(strings.ReplaceAll(normalizeLineEndings(n.value), "\n", " "))
 		e.buf.WriteByte('\n')
 	}
@@ -456,8 +454,6 @@ func (e *encoder) emitInlineComments(comments []Comment) {
 	}
 }
 
-// Reflection-based encoding follows.
-
 // encode is the top-level reflection entry point. It encodes v (which must
 // be a Go value of any supported type) to JSONC.
 func (e *encoder) encode(v any) ([]byte, error) {
@@ -481,19 +477,17 @@ func (e *encoder) encodeValue(rv reflect.Value, depth int) error {
 		return nil
 	}
 
-	// Special-cased types take priority — they produce a specific source
-	// form (raw bytes, raw number text, base64 string, etc.) regardless of
-	// any interface they may also satisfy.
+	// Special-cased types take priority over the marshaler interfaces:
+	// a raw-bytes / raw-number / base64 path preserves the source form,
+	// whereas the interface dispatch would re-encode through the user code.
 	if handled, err := e.encodeSpecialType(rv); handled {
 		return err
 	}
 
-	// Custom marshalers (registered via WithCustomMarshaler).
 	if handled, err := e.encodeCustomMarshaler(rv); handled {
 		return err
 	}
 
-	// Marshaler interfaces (priority order).
 	if handled, err := e.encodeMarshaler(rv); handled {
 		return err
 	}
@@ -565,9 +559,8 @@ func (e *encoder) encodeFloat(rv reflect.Value) error {
 	if rv.Kind() == reflect.Float32 {
 		bits = 32
 	}
-	// Use the shortest round-trippable representation. strconv.FormatFloat
-	// with 'g' precision -1 gives stdlib-like output but stdlib actually
-	// uses a custom approach; we follow the same pattern as encoding/json.
+	// Match encoding/json's float formatting: choose 'e' vs 'f' based on
+	// magnitude thresholds, then strip a leading zero from the exponent.
 	abs := math.Abs(f)
 	fmtByte := byte('f')
 	if abs != 0 {
@@ -580,7 +573,7 @@ func (e *encoder) encodeFloat(rv reflect.Value) error {
 	}
 	out := strconv.AppendFloat(nil, f, fmtByte, -1, bits)
 	if fmtByte == 'e' {
-		// Match stdlib: strip leading zero from exponent (e.g., "1e+09" → "1e+9").
+		// e.g. "1e+09" -> "1e+9", matching stdlib output.
 		for i := range len(out) - 1 {
 			if out[i] == 'e' && (out[i+1] == '+' || out[i+1] == '-') && i+2 < len(out) && out[i+2] == '0' && i+3 < len(out) {
 				out = append(out[:i+2], out[i+3:]...)
@@ -603,8 +596,9 @@ func (e *encoder) encodeSpecialType(rv reflect.Value) (bool, error) {
 			e.buf.WriteString("null")
 			return true, nil
 		}
-		// Re-emit through the parser+AST encoder to enforce strict-JSON
-		// output if requested, otherwise pass through.
+		// In strict-JSON-output mode we must round-trip the bytes through
+		// the parser to drop comments and trailing commas; otherwise the
+		// raw value is passed through verbatim.
 		if e.opts.strictJSONOutput {
 			out, err := ToJSON(raw)
 			if err != nil {
@@ -725,15 +719,14 @@ func (e *encoder) encodeCustomMarshaler(rv reflect.Value) (bool, error) {
 
 // encodeMarshaler dispatches to user-defined marshaler interfaces in
 // priority order: MarshalerContext, Marshaler, json.Marshaler,
-// TextMarshaler.
+// TextMarshaler. Pointer-receiver methods are tried first because the
+// pointer method set is a superset of the value method set.
 func (e *encoder) encodeMarshaler(rv reflect.Value) (bool, error) {
-	// Check pointer-receiver methods first (they have the larger method set).
 	if rv.CanAddr() {
 		if handled, err := e.encodeMarshalerForValue(rv.Addr()); handled {
 			return true, err
 		}
 	}
-	// Fall back to value-receiver methods.
 	if rv.CanInterface() {
 		return e.encodeMarshalerForValue(rv)
 	}
@@ -772,7 +765,6 @@ func (e *encoder) encodeMarshalerForValue(rv reflect.Value) (bool, error) {
 		return true, nil
 	}
 	if m, ok := iface.(encoding.TextMarshaler); ok {
-		// TextMarshaler produces a string value.
 		text, err := m.MarshalText()
 		if err != nil {
 			return true, err
@@ -783,13 +775,13 @@ func (e *encoder) encodeMarshalerForValue(rv reflect.Value) (bool, error) {
 	return false, nil
 }
 
-// encodeSlice handles slice values (including []byte → base64).
+// encodeSlice handles slice values, base64-encoding []byte to match
+// encoding/json.
 func (e *encoder) encodeSlice(rv reflect.Value, depth int) error {
 	if rv.IsNil() {
 		e.buf.WriteString("null")
 		return nil
 	}
-	// []byte is encoded as a base64 string, matching stdlib.
 	if rv.Type().Elem().Kind() == reflect.Uint8 {
 		e.writeBase64(rv.Bytes())
 		return nil
@@ -800,7 +792,7 @@ func (e *encoder) encodeSlice(rv reflect.Value, depth int) error {
 // encodeArrayValue handles array values (fixed-size, including [N]byte).
 func (e *encoder) encodeArrayValue(rv reflect.Value, depth int) error {
 	if rv.Type().Elem().Kind() == reflect.Uint8 {
-		// Copy the array into a slice so we can base64-encode it.
+		// Arrays don't expose Bytes(); copy into a slice for base64 encoding.
 		buf := make([]byte, rv.Len())
 		for i := range rv.Len() {
 			buf[i] = byte(rv.Index(i).Uint())
@@ -892,7 +884,8 @@ func (e *encoder) writeBase64(data []byte) {
 	}
 	e.buf.WriteByte('"')
 	const enc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	// Manual base64 to avoid an extra allocation; matches encoding/base64.StdEncoding.
+	// Inlined base64 (matches encoding/base64.StdEncoding) so the encoded
+	// bytes go straight into e.buf without an intermediate allocation.
 	for i := 0; i < len(data); i += 3 {
 		var b1, b2, b3 byte
 		b1 = data[i]
@@ -933,8 +926,6 @@ func (e *encoder) encodeMap(rv reflect.Value, depth int) error {
 		return nil
 	}
 
-	// Build (string-key, reflect.Value) pairs, then sort for deterministic
-	// output (lexicographic by default).
 	pairs := make([]mapKV, len(keys))
 	for i, k := range keys {
 		s, err := mapKeyString(k)
@@ -1117,15 +1108,15 @@ type mapKV struct {
 }
 
 // sortMapPairs sorts a slice of (key, value) pairs according to the
-// configured ordering policy.
+// configured ordering policy. For [MapKeyOrderInsertion] applied to a
+// native Go map, "insertion" is whatever order MapKeys() happened to
+// return — meaningful only when the source is a [MapSlice] (handled by
+// encodeMapSlice).
 func sortMapPairs(pairs []mapKV, order MapKeyOrder) {
 	switch order {
 	case MapKeyOrderInsertion:
-		// Caller order — leave alone. Note: Go map iteration is
-		// non-deterministic, so this option is most meaningful when the
-		// input is a MapSlice (handled separately).
 		return
-	default: // MapKeyOrderLexicographic
+	default:
 		sort.Slice(pairs, func(i, j int) bool {
 			return pairs[i].keyStr < pairs[j].keyStr
 		})
@@ -1137,7 +1128,8 @@ func sortMapPairs(pairs []mapKV, order MapKeyOrder) {
 func (e *encoder) encodeStruct(rv reflect.Value, depth int) error {
 	sf := getStructFields(rv.Type())
 
-	// Collect fields that will actually be emitted, after omit checks.
+	// Resolve omitempty / omitzero up front so the trailing-comma logic
+	// below can rely on len(emits)-1 being the true last emitted member.
 	type emit struct {
 		fi      fieldInfo
 		val     reflect.Value
@@ -1192,10 +1184,9 @@ func (e *encoder) encodeStruct(rv reflect.Value, depth int) error {
 		e.buf.WriteString(": ")
 
 		if em.fi.commented && !e.opts.strictJSONOutput && multi {
-			// The `commented` jsonc tag option emits the value as a /* … */
-			// placeholder in multi-line output. This path doesn't honor
-			// inline/foot WithComment annotations because there is no
-			// value-position to attach them to.
+			// `commented` wraps the encoded value in /* ... */, so there is
+			// no value-position to attach line/foot WithComment annotations
+			// to. Only the head comments above were honored.
 			e.buf.WriteString("/* ")
 			if err := e.encodeFieldValue(em.fi, em.val, depth+1); err != nil {
 				e.popPath()
@@ -1214,10 +1205,8 @@ func (e *encoder) encodeStruct(rv reflect.Value, depth int) error {
 
 		isLast := i == len(emits)-1
 
-		// Comma immediately after value, before any inline comment. (Inline
-		// comments only render in multi-line, non-strict-output mode, but the
-		// ordering must hold either way: `value, // inline` not `value //
-		// inline,`.)
+		// Comma must precede any inline comment so the output reads
+		// `value, // inline` rather than `value // inline,`.
 		switch {
 		case !isLast:
 			e.buf.WriteByte(',')
@@ -1225,14 +1214,10 @@ func (e *encoder) encodeStruct(rv reflect.Value, depth int) error {
 			e.buf.WriteByte(',')
 		}
 
-		// Inline (line) comment: directly after the comma, before the newline.
 		if multi && !e.opts.strictJSONOutput {
 			e.emitInlineComments(e.commentsAt(LineCommentPos))
 		}
 
-		// Separator: newline for multi non-last, space for compact non-last.
-		// The closing-brace block handles the final newline for the last
-		// member.
 		if !isLast {
 			if multi {
 				e.buf.WriteByte('\n')
@@ -1241,8 +1226,6 @@ func (e *encoder) encodeStruct(rv reflect.Value, depth int) error {
 			}
 		}
 
-		// Foot comments: appear after the newline (or, for the last
-		// member, on a fresh line before the closing brace).
 		if multi && !e.opts.strictJSONOutput {
 			feet := e.commentsAt(FootCommentPos)
 			if len(feet) > 0 {
@@ -1272,8 +1255,9 @@ func (e *encoder) encodeStruct(rv reflect.Value, depth int) error {
 // encodeFieldValue handles per-field options such as `,string`.
 func (e *encoder) encodeFieldValue(fi fieldInfo, fv reflect.Value, depth int) error {
 	if fi.asString && isStringEncodable(fv) {
-		// Encode primitive into the buffer, capture the bytes, truncate, then
-		// re-emit as a JSON-quoted string.
+		// Two-pass approach: encode the primitive into the buffer, snapshot
+		// the bytes, truncate, and re-emit as a JSON-quoted string. Avoids
+		// duplicating the per-kind formatting logic.
 		start := e.buf.Len()
 		if err := e.encodeValue(fv, depth); err != nil {
 			return err

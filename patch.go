@@ -184,7 +184,6 @@ func opAdd(root *Node, path string, value *Node) (*Node, error) {
 	}
 	switch parent.Kind {
 	case ObjectNode:
-		// If the member already exists, replace its value; otherwise append.
 		for _, c := range parent.Children {
 			if c.Kind == KeyValueNode && c.Key == last {
 				if len(c.Children) > 0 {
@@ -266,7 +265,8 @@ func opReplace(root *Node, path string, value *Node) (*Node, error) {
 	if len(tokens) == 0 {
 		return cloneNode(value), nil
 	}
-	// Confirm target exists, then call add (which handles both insert and overwrite).
+	// Replace differs from add only in requiring the target to exist;
+	// confirm it does, then defer to add for the actual write.
 	if _, err := resolveTarget(root, tokens); err != nil {
 		return nil, err
 	}

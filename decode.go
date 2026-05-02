@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"math/big"
 	"reflect"
 	"strconv"
@@ -70,8 +69,8 @@ func (d *decoder) decode(root *node, v any) error {
 // decodeValue routes a single AST node to the right type-specific decoder
 // based on the target reflect.Value's kind and any unmarshaler interfaces.
 func (d *decoder) decodeValue(n *node, rv reflect.Value) error {
-	// Walk through pointers, allocating as needed, except for null which
-	// terminates at the pointer (sets it to nil).
+	// JSON null terminates at the outermost pointer (sets it to nil); for
+	// any other value we walk through pointers, allocating as needed.
 	for rv.Kind() == reflect.Pointer {
 		if n.kind == nodeNull {
 			if !rv.IsNil() {
@@ -85,14 +84,14 @@ func (d *decoder) decodeValue(n *node, rv reflect.Value) error {
 		rv = rv.Elem()
 	}
 
-	// Special-cased types (RawValue, json.RawMessage, json.Number, time.Time)
-	// take priority before unmarshaler interfaces — they would also satisfy
-	// some interfaces, but the special-case path preserves the value verbatim.
+	// Special-cased types take priority before unmarshaler interfaces:
+	// some of them (e.g. json.Number) would also satisfy a TextUnmarshaler
+	// or json.Unmarshaler dispatch, but the special-case path preserves the
+	// source bytes verbatim where the interface route would re-encode.
 	if d.decodeSpecialType(n, rv) {
 		return nil
 	}
 
-	// Custom unmarshalers (registered via WithCustomUnmarshaler).
 	if d.opts.customUnmarshalers != nil {
 		if fn, ok := d.opts.customUnmarshalers[rv.Type()]; ok {
 			raw := nodeRawBytes(n)
@@ -108,14 +107,12 @@ func (d *decoder) decodeValue(n *node, rv reflect.Value) error {
 		}
 	}
 
-	// Unmarshaler interfaces (priority order).
 	if rv.CanAddr() && rv.Addr().CanInterface() {
 		if handled, err := d.decodeViaInterface(n, rv); handled {
 			return err
 		}
 	}
 
-	// Default reflection-based dispatch.
 	switch n.kind {
 	case nodeNull:
 		return d.decodeNull(rv)
@@ -146,7 +143,6 @@ func (d *decoder) decodeSpecialType(n *node, rv reflect.Value) bool {
 		rv.SetBytes(nodeRawBytes(n))
 		return true
 	case reflect.TypeFor[json.Number]():
-		// json.Number can absorb any number; for non-numbers, accumulate type error.
 		if n.kind != nodeNumber {
 			d.typeErrorf(n, "cannot decode %s into json.Number", nodeKindName(n.kind))
 			return true
@@ -168,7 +164,7 @@ func (d *decoder) decodeSpecialType(n *node, rv reflect.Value) bool {
 		return true
 	}
 
-	// time.Duration via int64 path is handled in decodeNumber/decodeString.
+	// time.Duration is handled via the int64 / string paths below.
 	return false
 }
 
@@ -202,9 +198,9 @@ func (d *decoder) decodeViaInterface(n *node, rv reflect.Value) (bool, error) {
 	return false, nil
 }
 
-// makeUnmarshalCallback returns the closure passed to Unmarshaler /
-// UnmarshalerContext methods. The user code calls it with a Go value; we
-// decode the same node into that value.
+// makeUnmarshalCallback returns the closure passed to Unmarshaler and
+// UnmarshalerContext implementations. User code calls it with a Go value
+// to decode the same node into that value.
 func (d *decoder) makeUnmarshalCallback(n *node) func(any) error {
 	return func(v any) error {
 		return d.decode(n, v)
@@ -212,13 +208,7 @@ func (d *decoder) makeUnmarshalCallback(n *node) func(any) error {
 }
 
 func (d *decoder) decodeNull(rv reflect.Value) error {
-	switch rv.Kind() {
-	case reflect.Interface, reflect.Map, reflect.Slice:
-		rv.Set(reflect.Zero(rv.Type()))
-	default:
-		// For other kinds, leave at zero value (matches stdlib).
-		rv.Set(reflect.Zero(rv.Type()))
-	}
+	rv.Set(reflect.Zero(rv.Type()))
 	return nil
 }
 
@@ -297,11 +287,9 @@ func (d *decoder) numberToInterface(n *node, rv reflect.Value, s string, isFloat
 		rv.Set(reflect.ValueOf(f))
 		return
 	}
-	// Try int64 first; on overflow, fall back to float64 (matches stdlib's
-	// behavior of using float64 for any number when UseNumber is off).
+	// Stdlib produces float64 for all numbers in interface{} mode when
+	// UseNumber is off; we match that convention here.
 	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
-		// Stdlib produces float64 for all numbers in interface{} mode (without
-		// UseNumber). We follow that convention.
 		rv.Set(reflect.ValueOf(float64(i)))
 		return
 	}
@@ -374,7 +362,8 @@ func (d *decoder) decodeString(n *node, rv reflect.Value) error {
 }
 
 func (d *decoder) decodeArray(n *node, rv reflect.Value) error {
-	// Filter out comment children so length checks and elements are aligned.
+	// Filter out CommentNode siblings so length checks and element indices
+	// align with the value children only.
 	values := valueChildren(n)
 	switch rv.Kind() {
 	case reflect.Slice:
@@ -464,8 +453,9 @@ func (d *decoder) decodeObjectToStruct(n *node, rv reflect.Value) error {
 		fi := sf.fields[idx]
 		fv := fieldByIndexAlloc(rv, fi.index)
 
-		// Note: a JSON null sets pointer/interface fields to nil; "key
-		// present with null" satisfies `required` (the key exists).
+		// "Key present with explicit null" satisfies `required` — the
+		// presence check above (assigned[key] = true) runs before the null
+		// is decoded, so a required field with a null value is accepted.
 		valueChild := child.children[0]
 		if err := d.decodeValue(valueChild, fv); err != nil {
 			return err
@@ -797,14 +787,13 @@ func nodeRawBytes(n *node) []byte {
 		return []byte(n.value)
 	default:
 		if n.rawBytes != nil {
-			// Return a copy so callers cannot mutate the parsed input.
+			// Defensive copy so callers cannot mutate the parsed input.
 			out := make([]byte, len(n.rawBytes))
 			copy(out, n.rawBytes)
 			return out
 		}
-		// Re-emit container as compact JSONC. The AST encoder is total over
-		// well-formed nodes — encodeNode only ever returns nil error for
-		// container kinds — so we don't propagate the error here.
+		// The AST encoder is total over well-formed container nodes, so a
+		// non-nil error here is unreachable in practice; treat it as nil.
 		enc := newNodeEncoder(defaultEncodeOptions())
 		out, err := enc.encodeNode(n)
 		if err != nil {
@@ -844,8 +833,3 @@ func nodeKindName(k nodeKind) string {
 		return "unknown"
 	}
 }
-
-// avoidUnusedImport keeps the math import alive for future use (e.g.,
-// detecting NaN/Inf during decode of typed numbers). The decoder itself
-// doesn't currently need math at top level, but the file's tests do.
-var _ = math.Inf

@@ -9,8 +9,11 @@ import (
 
 // Position identifies a location within JSONC source text.
 type Position struct {
-	Line   int
+	// Line is the 1-indexed line number; 0 means "no position".
+	Line int
+	// Column is the 1-indexed column number on Line.
 	Column int
+	// Offset is the 0-indexed byte offset from the start of the input.
 	Offset int
 }
 
@@ -22,9 +25,13 @@ func (p Position) String() string {
 // SyntaxError is returned when the JSONC input is malformed.
 // Use [errors.Is](err, [ErrSyntax]) to test for syntax errors generically.
 type SyntaxError struct {
+	// Message is a short human-readable description of the syntactic problem.
 	Message string
-	Pos     Position
-	Token   string
+	// Pos is the source position where the error was detected; Line == 0
+	// when the error has no specific location.
+	Pos Position
+	// Token is the offending token text, when available.
+	Token string
 }
 
 func (e *SyntaxError) Error() string {
@@ -40,8 +47,11 @@ func (e *SyntaxError) Is(target error) bool {
 }
 
 // TypeError is returned when one or more JSONC values cannot be assigned to
-// the target Go types. Errors contains a message for each failed conversion.
+// the target Go types. The decoder accumulates conversion failures rather
+// than failing fast and returns them all at once via this type.
 type TypeError struct {
+	// Errors holds one message per failed value-to-target conversion, each
+	// already prefixed with "line N: " when a position is known.
 	Errors []string
 }
 
@@ -57,8 +67,10 @@ func (e *TypeError) Is(target error) bool {
 // UnknownFieldError is returned when decoding with [WithStrict] and a JSONC
 // key has no corresponding struct field.
 type UnknownFieldError struct {
+	// Field is the JSONC key that did not match any struct field.
 	Field string
-	Pos   Position
+	// Pos is the source position of the unrecognized key.
+	Pos Position
 }
 
 func (e *UnknownFieldError) Error() string {
@@ -74,7 +86,9 @@ func (e *UnknownFieldError) Is(target error) bool {
 // By default duplicates are rejected; pass [WithAllowDuplicateKeys] to opt
 // into stdlib-style last-wins behavior.
 type DuplicateKeyError struct {
+	// Key is the duplicated object member name.
 	Key string
+	// Pos is the source position of the second (offending) occurrence.
 	Pos Position
 }
 
@@ -88,9 +102,13 @@ func (e *DuplicateKeyError) Is(target error) bool {
 }
 
 // ValidationError wraps an error returned by a [StructValidator] with the
-// [Position] of the JSONC node that was decoded into the struct.
+// [Position] of the JSONC node that was decoded into the struct. Err is
+// available via [errors.Unwrap] for callers that want the underlying value.
 type ValidationError struct {
+	// Err is the error returned by the validator.
 	Err error
+	// Pos is the source position of the JSONC object that produced the
+	// validated struct value.
 	Pos Position
 }
 
@@ -108,11 +126,14 @@ func (e *ValidationError) Is(target error) bool {
 }
 
 // DefaultError is returned when a default value from a struct tag cannot be
-// applied.
+// applied (parse failure, overflow, or unsupported field type).
 type DefaultError struct {
-	Field   string
+	// Field is the struct field name (or jsonc-tag name, when set).
+	Field string
+	// Message describes why the default could not be applied.
 	Message string
-	Pos     Position
+	// Pos is the source position of the surrounding object, if known.
+	Pos Position
 }
 
 func (e *DefaultError) Error() string {
@@ -126,9 +147,12 @@ func (e *DefaultError) Is(target error) bool {
 
 // OverflowError is returned when a JSONC number overflows the target Go type.
 type OverflowError struct {
+	// Value is the offending number's source text.
 	Value string
-	Type  string
-	Pos   Position
+	// Type is the Go target type that could not hold Value.
+	Type string
+	// Pos is the source position of the number.
+	Pos Position
 }
 
 func (e *OverflowError) Error() string {
@@ -143,8 +167,11 @@ func (e *OverflowError) Is(target error) bool {
 // StrictJSONError is returned when the input contains a JSONC extension
 // (a comment or a trailing comma) while [WithStrictJSON] is enabled.
 type StrictJSONError struct {
+	// Feature names the rejected extension, e.g. "// line comment" or
+	// "trailing comma".
 	Feature string
-	Pos     Position
+	// Pos is the source position where the extension appeared.
+	Pos Position
 }
 
 func (e *StrictJSONError) Error() string {

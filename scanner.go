@@ -5,16 +5,10 @@ import (
 	"fmt"
 )
 
-// scanner converts JSONC source bytes into a slice of tokens. It is synchronous
-// (no goroutines), single-pass, and produces position-annotated tokens
-// preserving comment text.
-//
-// The scanner accepts JWCC by default (line and block comments, optional
-// trailing commas). When strictJSON is true, comments and trailing commas are
-// reported as syntax errors with a [StrictJSONError]; the scanner itself does
-// not detect trailing commas because they appear in structural position only
-// the parser distinguishes — but the scanner reports any comment under
-// strict mode.
+// scanner converts JSONC source bytes into a slice of tokens. It is
+// single-pass and produces position-annotated tokens preserving comment text.
+// When strictJSON is true, the scanner reports comments as a [StrictJSONError];
+// trailing commas are detected by the parser, not the scanner.
 type scanner struct {
 	src    []byte
 	pos    int // byte offset in src
@@ -79,7 +73,7 @@ func (s *scanner) scanNext() error {
 	case ch == ' ' || ch == '\t':
 		s.advance()
 	case ch == '\r':
-		// CR or CRLF: emit a single newline token. Bare CR is also accepted.
+		// CR, CRLF, and bare LF all yield a single tokenNewline.
 		s.advance()
 		if !s.atEnd() && s.peek() == '\n' {
 			s.advance()
@@ -143,23 +137,22 @@ func (s *scanner) scanLineComment(startPos Position) error {
 	if s.strictJSON {
 		return &StrictJSONError{Feature: "// line comment", Pos: startPos}
 	}
-	s.advance() // consume first '/'
-	s.advance() // consume second '/'
+	s.advance()
+	s.advance()
 	textStart := s.pos
 	for !s.atEnd() {
 		ch := s.src[s.pos]
 		if ch == '\n' || ch == '\r' {
 			break
 		}
-		// Reject control chars (other than tab) inside comments.
 		if ch < 0x20 && ch != '\t' {
 			return s.syntaxError(fmt.Sprintf("control character U+%04X in line comment", ch))
 		}
 		s.advance()
 	}
 	text := string(s.src[textStart:s.pos])
-	// Note: the line ending itself is not consumed here; the main scan loop
-	// will produce a tokenNewline for it on the next iteration.
+	// Leave the line terminator for the main scan loop, which will emit a
+	// tokenNewline for it.
 	s.tokens = append(s.tokens, token{
 		kind:  tokenLineComment,
 		value: text,
@@ -175,14 +168,13 @@ func (s *scanner) scanBlockComment(startPos Position) error {
 	if s.strictJSON {
 		return &StrictJSONError{Feature: "/* */ block comment", Pos: startPos}
 	}
-	s.advance() // consume '/'
-	s.advance() // consume '*'
+	s.advance()
+	s.advance()
 	textStart := s.pos
 	var buf []byte
 	hasCR := false
 	for !s.atEnd() {
 		ch := s.src[s.pos]
-		// Look for closing */
 		if ch == '*' && s.pos+1 < len(s.src) && s.src[s.pos+1] == '/' {
 			var text string
 			if hasCR {
@@ -190,8 +182,8 @@ func (s *scanner) scanBlockComment(startPos Position) error {
 			} else {
 				text = string(s.src[textStart:s.pos])
 			}
-			s.advance() // consume '*'
-			s.advance() // consume '/'
+			s.advance()
+			s.advance()
 			s.tokens = append(s.tokens, token{
 				kind:  tokenBlockComment,
 				value: text,
@@ -199,7 +191,9 @@ func (s *scanner) scanBlockComment(startPos Position) error {
 			})
 			return nil
 		}
-		// Normalize CR / CRLF → LF in stored comment text.
+		// Normalize CR / CRLF to LF in stored comment text. The buffered slow
+		// path engages only after the first CR; otherwise the body is
+		// returned as a direct slice of the source.
 		if ch == '\r' {
 			if !hasCR {
 				buf = append(buf, s.src[textStart:s.pos]...)
@@ -212,7 +206,6 @@ func (s *scanner) scanBlockComment(startPos Position) error {
 			}
 			continue
 		}
-		// Reject control chars (other than tab/LF/CR) inside comments.
 		if ch < 0x20 && ch != '\t' && ch != '\n' {
 			return s.syntaxError(fmt.Sprintf("control character U+%04X in block comment", ch))
 		}
@@ -230,12 +223,12 @@ func (s *scanner) scanBlockComment(startPos Position) error {
 // unescaping is done lazily at decode time).
 func (s *scanner) scanString() error {
 	startPos := s.position()
-	s.advance() // consume opening '"'
+	s.advance()
 	for !s.atEnd() {
 		ch := s.src[s.pos]
 		switch {
 		case ch == '"':
-			s.advance() // consume closing '"'
+			s.advance()
 			value := string(s.src[startPos.Offset:s.pos])
 			s.tokens = append(s.tokens, token{
 				kind:  tokenString,
@@ -265,7 +258,7 @@ func (s *scanner) scanString() error {
 // happens at decode time, not at scan time.
 func (s *scanner) scanEscape() error {
 	escPos := s.position()
-	s.advance() // consume backslash
+	s.advance()
 	if s.atEnd() {
 		return s.syntaxErrorAt(escPos, "incomplete escape sequence at end of input")
 	}
@@ -275,7 +268,7 @@ func (s *scanner) scanEscape() error {
 		s.advance()
 		return nil
 	case 'u':
-		s.advance() // consume 'u'
+		s.advance()
 		if s.pos+4 > len(s.src) {
 			return s.syntaxErrorAt(escPos, "incomplete \\u escape (need 4 hex digits)")
 		}
@@ -306,7 +299,6 @@ func (s *scanner) scanNumber() error {
 	startPos := s.position()
 	start := s.pos
 
-	// Optional minus.
 	if s.src[s.pos] == '-' {
 		s.advance()
 		if s.atEnd() {
@@ -314,7 +306,6 @@ func (s *scanner) scanNumber() error {
 		}
 	}
 
-	// Integer part.
 	if s.atEnd() {
 		return s.syntaxErrorAt(startPos, "expected digit in number")
 	}
@@ -324,7 +315,8 @@ func (s *scanner) scanNumber() error {
 	}
 	if first == '0' {
 		s.advance()
-		// After a leading 0, the next char must NOT be a digit (no leading zeros).
+		// After a leading 0, the next char must not be a digit (RFC 8259
+		// forbids leading zeros).
 		if !s.atEnd() {
 			c := s.src[s.pos]
 			if c >= '0' && c <= '9' {
@@ -332,7 +324,6 @@ func (s *scanner) scanNumber() error {
 			}
 		}
 	} else {
-		// 1-9 followed by 0+ digits.
 		s.advance()
 		for !s.atEnd() {
 			c := s.src[s.pos]
@@ -343,7 +334,6 @@ func (s *scanner) scanNumber() error {
 		}
 	}
 
-	// Optional fraction.
 	if !s.atEnd() && s.src[s.pos] == '.' {
 		s.advance()
 		if s.atEnd() {
@@ -362,7 +352,6 @@ func (s *scanner) scanNumber() error {
 		}
 	}
 
-	// Optional exponent.
 	if !s.atEnd() && (s.src[s.pos] == 'e' || s.src[s.pos] == 'E') {
 		s.advance()
 		if s.atEnd() {
@@ -406,7 +395,8 @@ func (s *scanner) scanLiteralWord(word string, kind tokenKind) error {
 	if !bytes.Equal(s.src[s.pos:s.pos+len(word)], []byte(word)) {
 		return s.syntaxError(fmt.Sprintf("expected %q", word))
 	}
-	// Boundary check — keyword must not be a prefix of an identifier.
+	// The keyword must not be a prefix of an identifier; otherwise inputs
+	// like "nullable" would falsely match "null".
 	if s.pos+len(word) < len(s.src) {
 		next := s.src[s.pos+len(word)]
 		if isLetter(next) || isDigit(next) || next == '_' {
@@ -466,10 +456,9 @@ func (s *scanner) advance() {
 		s.line++
 		s.col = 1
 	case '\r':
-		// Bare CR or first byte of CRLF — count as line break. If followed
-		// by LF, the LF will increment line count.
+		// For CRLF, leave the line increment for the LF byte to avoid
+		// double-counting; bare CR increments here.
 		if s.pos+1 < len(s.src) && s.src[s.pos+1] == '\n' {
-			// CRLF: line increments on the LF, leave CR as same-line.
 			s.col++
 		} else {
 			s.line++

@@ -43,8 +43,7 @@ const (
 //   - children: for nodeObject (members), nodeArray (elements), or
 //     nodeKeyValue (single value).
 //   - pos: position of the node's first token.
-//   - comment / headComment / footComment: comment-association annotations
-//     (see §12.6 #5 of the requirements doc).
+//   - comment / headComment / footComment: comment-association annotations.
 type node struct {
 	kind        nodeKind
 	key         string
@@ -197,7 +196,10 @@ func (n *Node) Validate() error {
 // represent a single JSON value at the top level (typically an object,
 // but JSON permits any value).
 type File struct {
-	Root     *Node
+	// Root is the top-level value parsed from the input.
+	Root *Node
+	// Warnings holds non-fatal advisory messages produced during parsing.
+	// An empty slice (or nil) indicates a clean parse.
 	Warnings []string
 }
 

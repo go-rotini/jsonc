@@ -9,7 +9,7 @@ import (
 // produced by [scanner.scan] and produces a *node tree representing the
 // JSONC document.
 //
-// Comment association rules (see §12.6 #5 of the requirements doc):
+// Comment association rules:
 //   - HeadComment: comments preceding a node, separated from the previous
 //     token by at least one newline. Multiple stacked comments form a
 //     newline-joined string.
@@ -50,14 +50,11 @@ func (p *parser) withData(data []byte) *parser {
 // handled at the Decoder layer; one-shot parses must consume the whole
 // input.)
 func (p *parser) parse() (*node, error) {
-	// Consume StreamStart.
 	p.consumeIfKind(tokenStreamStart)
 
-	// Skip leading whitespace/newlines/comments before the value. Capture
-	// any leading comments as the head comment of the root.
+	// Comments before the value become the root's head comment.
 	leadHead := p.collectHeadComments()
 
-	// Empty document.
 	tk := p.peek()
 	if tk.kind == tokenEOF || tk.kind == tokenStreamEnd {
 		return nil, &SyntaxError{Message: "expected JSON value, got EOF", Pos: tk.pos}
@@ -75,9 +72,6 @@ func (p *parser) parse() (*node, error) {
 		}
 	}
 
-	// Consume any trailing whitespace/newlines/comments after the value.
-	// Comments here are attached as the root's foot comment; non-comment
-	// content is rejected with "extra data after value".
 	if err := p.consumeTrailing(root); err != nil {
 		return nil, err
 	}
@@ -122,7 +116,7 @@ func (p *parser) parseValue() (*node, error) {
 // parseObject parses an object literal. The opening '{' is at p.peek().
 func (p *parser) parseObject() (*node, error) {
 	openTk := p.peek()
-	p.bump() // consume '{'
+	p.bump()
 	obj := &node{kind: nodeObject, pos: openTk.pos}
 	if err := p.bumpNodeCount(); err != nil {
 		return nil, err
@@ -131,8 +125,6 @@ func (p *parser) parseObject() (*node, error) {
 	pendingHead := ""
 	justConsumedComma := false
 	for {
-		// At each loop top, ingest any whitespace+comments since the
-		// previous member (or since '{' on first iteration).
 		captured := p.collectHeadComments()
 		pendingHead = appendCommentBlock(pendingHead, captured)
 
@@ -145,7 +137,7 @@ func (p *parser) parseObject() (*node, error) {
 				obj.footComment = appendCommentBlock(obj.footComment, pendingHead)
 			}
 			closeOffset := tk.pos.Offset + 1
-			p.bump() // consume '}'
+			p.bump()
 			obj.comment = p.collectTrailingInlineComment()
 			if p.data != nil && openTk.pos.Offset >= 0 && closeOffset <= len(p.data) {
 				obj.rawBytes = p.data[openTk.pos.Offset:closeOffset]
@@ -188,15 +180,13 @@ func (p *parser) parseObject() (*node, error) {
 			return nil, &SyntaxError{Message: "maximum key count exceeded", Pos: member.pos}
 		}
 
-		// Inline comment on the same line as the member's value.
 		if c := p.collectTrailingInlineComment(); c != "" {
 			member.comment = c
 		}
 
-		// Now ingest any newlines+comments before ',' or '}'. Anything
-		// found here is "between member and separator" — attach to
-		// member.footComment if followed by ',' (so it stays with the
-		// member); attach to obj.footComment if followed by '}'.
+		// Comments after the member but before ',' or '}' belong to the
+		// member if a comma follows (keeps them with the member when it
+		// moves), or to the container if the object closes.
 		between := p.collectHeadComments()
 
 		tk = p.peek()
@@ -208,8 +198,6 @@ func (p *parser) parseObject() (*node, error) {
 			p.bump()
 			justConsumedComma = true
 		case tokenObjectEnd:
-			// Object closes after the member. Any between-comments are
-			// container foot comments.
 			if between != "" {
 				obj.footComment = appendCommentBlock(obj.footComment, between)
 			}
@@ -239,7 +227,6 @@ func (p *parser) parseMember(head string) (*node, error) {
 	}
 	p.bump()
 
-	// Allow whitespace/comments between key and ':'.
 	p.skipWhitespaceCommentsAndNewlines()
 
 	tk = p.peek()
@@ -249,7 +236,7 @@ func (p *parser) parseMember(head string) (*node, error) {
 			Pos:     tk.pos,
 		}
 	}
-	p.bump() // consume ':'
+	p.bump()
 	p.skipWhitespaceCommentsAndNewlines()
 
 	val, err := p.parseValue()
@@ -273,7 +260,7 @@ func (p *parser) parseMember(head string) (*node, error) {
 // parseArray parses an array literal. The opening '[' is at p.peek().
 func (p *parser) parseArray() (*node, error) {
 	openTk := p.peek()
-	p.bump() // consume '['
+	p.bump()
 	arr := &node{kind: nodeArray, pos: openTk.pos}
 	if err := p.bumpNodeCount(); err != nil {
 		return nil, err
@@ -362,8 +349,9 @@ func (p *parser) parseStringValue() (*node, error) {
 func (p *parser) parseNumberValue() (*node, error) {
 	tk := p.peek()
 	n := &node{
-		kind:     nodeNumber,
-		value:    tk.value, // numbers are stored verbatim — parsed lazily at decode time
+		kind: nodeNumber,
+		// Numbers are stored verbatim and parsed lazily at decode time.
+		value:    tk.value,
 		rawValue: tk.value,
 		pos:      tk.pos,
 	}
@@ -440,7 +428,6 @@ func (p *parser) collectTrailingInlineComment() string {
 		tk := p.peek()
 		switch tk.kind {
 		case tokenNewline:
-			// No inline comment found before the newline.
 			p.pos = saved
 			return ""
 		case tokenLineComment, tokenBlockComment:

@@ -9,8 +9,12 @@ type EncodeOption func(*encoderOptions)
 // Comment attaches a comment to a JSONC node identified by key path when
 // encoding with [WithComment].
 type Comment struct {
+	// Position is where this comment appears relative to its target node.
 	Position CommentPosition
-	Text     string
+	// Text is the comment body without delimiters; the encoder picks the
+	// // or /* */ form based on Position and on whether the text contains
+	// a line terminator.
+	Text string
 }
 
 // CommentPosition specifies where a [Comment] appears relative to its node.
@@ -36,11 +40,10 @@ type encoderOptions struct {
 }
 
 func defaultEncodeOptions() *encoderOptions {
-	return &encoderOptions{
-		// All defaults are zero-values; no indent, no HTML escape, no
-		// trailing comma, lexicographic map ordering, durations as int64
-		// nanoseconds (matching encoding/json).
-	}
+	// All defaults are the zero values: no indent, no HTML escape, no
+	// trailing comma, lexicographic map ordering, durations as int64
+	// nanoseconds — chosen to match encoding/json where applicable.
+	return &encoderOptions{}
 }
 
 // WithIndent sets the per-level indentation string. An empty string (default)

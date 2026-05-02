@@ -11,7 +11,9 @@ type MapSlice []MapItem
 // always strings, so [MapItem.Key] is typed as string (unlike the YAML and
 // TOML packages which permit any-typed keys).
 type MapItem struct {
-	Key   string
+	// Key is the unescaped JSON object member name.
+	Key string
+	// Value is the decoded value for this member.
 	Value any
 }
 
