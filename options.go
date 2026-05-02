@@ -122,9 +122,19 @@ func WithMapKeyOrder(order MapKeyOrder) EncodeOption {
 	return func(o *encoderOptions) { o.mapKeyOrder = order }
 }
 
-// WithComment attaches comments to nodes by dot-path key (e.g.,
-// "server.port"). Each key maps to a slice of [Comment] values specifying
-// position and text. Comments are emitted only when output is multi-line.
+// WithComment attaches comments to nodes by path. Each key in the map is a
+// path expression resolving the node to annotate; each value is a slice of
+// [Comment] entries specifying position ([HeadCommentPos] / [LineCommentPos]
+// / [FootCommentPos]) and text.
+//
+// Path syntax mirrors the encoder's own path construction:
+//   - Object members use dot notation: "server.port".
+//   - Map entries use the string form of the key: "users.alice".
+//   - Array elements use bracket-with-index: "tags[0]" or "items[3].name".
+//
+// Comments are emitted only when output is multi-line (indent is set) and
+// not in [WithStrictJSONOutput] mode. In compact or strict-JSON-output
+// modes the option is silently ignored.
 func WithComment(comments map[string][]Comment) EncodeOption {
 	return func(o *encoderOptions) { o.comments = comments }
 }

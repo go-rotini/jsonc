@@ -759,3 +759,240 @@ func TestEncodeUnsupportedFunc(t *testing.T) {
 		t.Errorf("expected ErrUnsupportedValue, got %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// WithComment(map[string][]Comment) — path-keyed comment injection
+// ---------------------------------------------------------------------------
+
+type withCommentServer struct {
+	Port int    `json:"port"`
+	Host string `json:"host"`
+}
+
+type withCommentRoot struct {
+	Server withCommentServer `json:"server"`
+	Tags   []string          `json:"tags"`
+}
+
+func TestEncodeWithCommentHead(t *testing.T) {
+	v := withCommentServer{Port: 8080, Host: "localhost"}
+	out, err := MarshalWithOptions(v,
+		WithIndent("  "),
+		WithComment(map[string][]Comment{
+			"port": {{Position: HeadCommentPos, Text: "the listening port"}},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\n  // the listening port\n  \"port\": 8080,\n  \"host\": \"localhost\"\n}"
+	if string(out) != want {
+		t.Errorf("got %q\nwant %q", out, want)
+	}
+}
+
+func TestEncodeWithCommentLine(t *testing.T) {
+	v := withCommentServer{Port: 8080, Host: "localhost"}
+	out, err := MarshalWithOptions(v,
+		WithIndent("  "),
+		WithComment(map[string][]Comment{
+			"port": {{Position: LineCommentPos, Text: "default"}},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"port": 8080, // default`) {
+		t.Errorf("expected line comment after value, got %q", out)
+	}
+}
+
+func TestEncodeWithCommentFootMid(t *testing.T) {
+	// Foot comment on a non-last field appears between members.
+	v := withCommentServer{Port: 8080, Host: "localhost"}
+	out, err := MarshalWithOptions(v,
+		WithIndent("  "),
+		WithComment(map[string][]Comment{
+			"port": {{Position: FootCommentPos, Text: "end of port section"}},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\n  \"port\": 8080,\n  // end of port section\n  \"host\": \"localhost\"\n}"
+	if string(out) != want {
+		t.Errorf("got %q\nwant %q", out, want)
+	}
+}
+
+func TestEncodeWithCommentFootLast(t *testing.T) {
+	// Foot comment on the last field appears before the closing brace,
+	// without an extra blank line.
+	v := withCommentServer{Port: 8080, Host: "localhost"}
+	out, err := MarshalWithOptions(v,
+		WithIndent("  "),
+		WithComment(map[string][]Comment{
+			"host": {{Position: FootCommentPos, Text: "trailing"}},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\n  \"port\": 8080,\n  \"host\": \"localhost\"\n  // trailing\n}"
+	if string(out) != want {
+		t.Errorf("got %q\nwant %q", out, want)
+	}
+}
+
+func TestEncodeWithCommentNestedPath(t *testing.T) {
+	v := withCommentRoot{
+		Server: withCommentServer{Port: 8080, Host: "localhost"},
+		Tags:   []string{"a"},
+	}
+	out, err := MarshalWithOptions(v,
+		WithIndent("  "),
+		WithComment(map[string][]Comment{
+			"server.port": {{Position: HeadCommentPos, Text: "nested head"}},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "    // nested head\n    \"port\": 8080") {
+		t.Errorf("expected nested head comment, got:\n%s", out)
+	}
+}
+
+func TestEncodeWithCommentArrayIndex(t *testing.T) {
+	v := withCommentRoot{
+		Server: withCommentServer{Port: 1, Host: "h"},
+		Tags:   []string{"first", "second", "third"},
+	}
+	out, err := MarshalWithOptions(v,
+		WithIndent("  "),
+		WithComment(map[string][]Comment{
+			"tags[1]": {{Position: HeadCommentPos, Text: "the middle one"}},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "// the middle one\n    \"second\"") {
+		t.Errorf("expected head comment on tags[1], got:\n%s", out)
+	}
+}
+
+func TestEncodeWithCommentMultiplePerPath(t *testing.T) {
+	v := withCommentServer{Port: 8080, Host: "localhost"}
+	out, err := MarshalWithOptions(v,
+		WithIndent("  "),
+		WithComment(map[string][]Comment{
+			"port": {
+				{Position: HeadCommentPos, Text: "first head"},
+				{Position: HeadCommentPos, Text: "second head"},
+				{Position: LineCommentPos, Text: "inline"},
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "// first head") || !strings.Contains(s, "// second head") {
+		t.Errorf("expected both head comments, got:\n%s", s)
+	}
+	if !strings.Contains(s, "// inline") {
+		t.Errorf("expected inline comment, got:\n%s", s)
+	}
+}
+
+func TestEncodeWithCommentDroppedInCompact(t *testing.T) {
+	// No indent → compact mode → comments must be dropped.
+	v := withCommentServer{Port: 8080, Host: "localhost"}
+	out, err := MarshalWithOptions(v,
+		WithComment(map[string][]Comment{
+			"port": {{Position: HeadCommentPos, Text: "should not appear"}},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "should not appear") {
+		t.Errorf("compact mode should drop comments, got: %s", out)
+	}
+	if strings.Contains(string(out), "//") {
+		t.Errorf("compact mode should drop comments, got: %s", out)
+	}
+}
+
+func TestEncodeWithCommentDroppedInStrictOutput(t *testing.T) {
+	v := withCommentServer{Port: 8080, Host: "localhost"}
+	out, err := MarshalWithOptions(v,
+		WithIndent("  "),
+		WithStrictJSONOutput(true),
+		WithComment(map[string][]Comment{
+			"port": {{Position: HeadCommentPos, Text: "should not appear"}},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "should not appear") {
+		t.Errorf("strict-JSON output should drop comments, got: %s", out)
+	}
+}
+
+func TestEncodeWithCommentMap(t *testing.T) {
+	// Same path-lookup logic must work for native maps.
+	v := map[string]int{"a": 1, "b": 2}
+	out, err := MarshalWithOptions(v,
+		WithIndent("  "),
+		WithComment(map[string][]Comment{
+			"a": {{Position: HeadCommentPos, Text: "first"}},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "// first\n  \"a\"") {
+		t.Errorf("expected head comment on map key 'a', got:\n%s", out)
+	}
+}
+
+func TestEncodeWithCommentMapSlice(t *testing.T) {
+	// MapSlice should also honor path lookups by key string.
+	v := MapSlice{
+		{Key: "x", Value: 1},
+		{Key: "y", Value: 2},
+	}
+	out, err := MarshalWithOptions(v,
+		WithIndent("  "),
+		WithComment(map[string][]Comment{
+			"x": {{Position: LineCommentPos, Text: "the x"}},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"x": 1, // the x`) {
+		t.Errorf("expected line comment on MapSlice key 'x', got:\n%s", out)
+	}
+}
+
+func TestEncodeWithCommentMultilineHeadText(t *testing.T) {
+	// Multi-line text in a head comment should produce multiple // lines.
+	v := withCommentServer{Port: 8080, Host: "localhost"}
+	out, err := MarshalWithOptions(v,
+		WithIndent("  "),
+		WithComment(map[string][]Comment{
+			"port": {{Position: HeadCommentPos, Text: "line one\nline two"}},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "// line one\n  // line two\n  \"port\"") {
+		t.Errorf("expected two-line head comment, got:\n%s", s)
+	}
+}

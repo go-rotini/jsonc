@@ -226,6 +226,38 @@ func ExampleRawValue() {
 	// Output: true
 }
 
+func ExampleWithComment() {
+	type Server struct {
+		Port int    `json:"port"`
+		Host string `json:"host"`
+	}
+	s := Server{Port: 8080, Host: "localhost"}
+	out, err := jsonc.MarshalWithOptions(s,
+		jsonc.WithIndent("  "),
+		jsonc.WithComment(map[string][]jsonc.Comment{
+			"port": {
+				{Position: jsonc.HeadCommentPos, Text: "Listening port"},
+				{Position: jsonc.LineCommentPos, Text: "default"},
+			},
+			"host": {
+				{Position: jsonc.FootCommentPos, Text: "Host configuration ends here."},
+			},
+		}),
+	)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Println(string(out))
+	// Output:
+	// {
+	//   // Listening port
+	//   "port": 8080, // default
+	//   "host": "localhost"
+	//   // Host configuration ends here.
+	// }
+}
+
 func ExampleStripComments() {
 	src := []byte(`{"a": 1 /* drop me */, "b": 2 // and me
 	}`)

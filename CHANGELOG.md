@@ -33,6 +33,7 @@ Initial release of the `go-rotini/jsonc` package — a Go JSONC (JSON with Comme
 - Map key ordering: lexicographic by default (deterministic output); `MapSlice` preserves insertion order.
 - Struct field ordering matches `encoding/json` (declaration order, tag-renamed fields keep their position).
 - HTML escaping is **off** by default (the differs from `encoding/json` for cleaner output) — use `WithEscapeHTML(true)` for stdlib parity.
+- `WithComment(map[string][]Comment)` — path-keyed comment injection for reflection encoding. Path syntax matches the encoder's path stack (dot for object members, bracket for array indices: `server.port`, `tags[0]`, `users.alice.email`). Supports head, line, and foot positions. Honored only in multi-line, non-strict-output mode.
 
 ### Whole-Document Helpers
 - `Format` — pretty-print JSONC, preserve comments, configurable indent (default 2 spaces).

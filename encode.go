@@ -40,6 +40,11 @@ type encoder struct {
 	// encoding stack; used to detect cycles. Keyed by reflect.Value pointer
 	// address.
 	visited map[uintptr]bool
+	// path is the current dot-and-bracket path during reflection encoding,
+	// used to look up [Comment] annotations registered via [WithComment].
+	// Each segment is the field/key (".name") or array index ("[N]"); the
+	// leading dot of the first segment is stripped by currentPath.
+	path []string
 }
 
 // newNodeEncoder constructs an encoder configured for AST emission (used
@@ -351,6 +356,70 @@ func hexDigit(n byte) byte {
 // is non-empty).
 func (e *encoder) multiline() bool {
 	return e.opts.indent != ""
+}
+
+// pushPathKey appends an object-member segment (".name") to the encoding
+// path stack used by [WithComment] lookups.
+func (e *encoder) pushPathKey(name string) {
+	e.path = append(e.path, "."+name)
+}
+
+// pushPathIndex appends an array-element segment ("[i]") to the encoding
+// path stack.
+func (e *encoder) pushPathIndex(i int) {
+	e.path = append(e.path, "["+strconv.Itoa(i)+"]")
+}
+
+// popPath removes the last segment from the encoding path stack.
+func (e *encoder) popPath() {
+	if len(e.path) > 0 {
+		e.path = e.path[:len(e.path)-1]
+	}
+}
+
+// currentPath joins the path stack into the dotted/bracketed form used as
+// the key in [WithComment]. Returns "" at the root.
+func (e *encoder) currentPath() string {
+	if len(e.path) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(strings.Join(e.path, ""), ".")
+}
+
+// commentsAt returns the [Comment] annotations registered for the current
+// path that match position pos. Returns nil in compact (non-multiline)
+// output, in strict-JSON output mode, or when no comments are registered —
+// in any of those cases the encoder skips comment emission entirely.
+func (e *encoder) commentsAt(pos CommentPosition) []Comment {
+	if !e.multiline() || e.opts.strictJSONOutput || len(e.opts.comments) == 0 {
+		return nil
+	}
+	all := e.opts.comments[e.currentPath()]
+	if len(all) == 0 {
+		return nil
+	}
+	out := make([]Comment, 0, len(all))
+	for _, c := range all {
+		if c.Position == pos {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// emitInlineComments appends each Comment as ` // text` directly to the buf,
+// joining when multiple comments share a position. No newline is emitted.
+func (e *encoder) emitInlineComments(comments []Comment) {
+	for _, c := range comments {
+		e.buf.WriteString(" // ")
+		// Only the first line of multi-line text fits inline; subsequent
+		// lines fall back to the comment-block form on their own line.
+		if i := strings.IndexByte(c.Text, '\n'); i >= 0 {
+			e.buf.WriteString(c.Text[:i])
+		} else {
+			e.buf.WriteString(c.Text)
+		}
+	}
 }
 
 // Reflection-based encoding follows.
@@ -720,26 +789,61 @@ func (e *encoder) encodeListLike(rv reflect.Value, depth int) error {
 	if multi {
 		e.buf.WriteByte('\n')
 	}
+	lastFootEmitted := false
 	for i := range n {
+		e.pushPathIndex(i)
+
+		if multi && !e.opts.strictJSONOutput {
+			for _, c := range e.commentsAt(HeadCommentPos) {
+				e.writeCommentBlock(c.Text, depth+1)
+			}
+		}
+
 		if multi {
 			e.writeIndent(depth + 1)
 		}
 		if err := e.encodeValue(rv.Index(i), depth+1); err != nil {
+			e.popPath()
 			return err
 		}
-		if i < n-1 {
+
+		isLast := i == n-1
+		switch {
+		case !isLast:
 			e.buf.WriteByte(',')
+		case multi && e.opts.trailingComma && !e.opts.strictJSONOutput:
+			e.buf.WriteByte(',')
+		}
+		if multi && !e.opts.strictJSONOutput {
+			e.emitInlineComments(e.commentsAt(LineCommentPos))
+		}
+		if !isLast {
 			if multi {
 				e.buf.WriteByte('\n')
 			} else {
 				e.buf.WriteByte(' ')
 			}
-		} else if multi && e.opts.trailingComma && !e.opts.strictJSONOutput {
-			e.buf.WriteByte(',')
 		}
+
+		if multi && !e.opts.strictJSONOutput {
+			feet := e.commentsAt(FootCommentPos)
+			if len(feet) > 0 {
+				if isLast {
+					e.buf.WriteByte('\n')
+					lastFootEmitted = true
+				}
+				for _, c := range feet {
+					e.writeCommentBlock(c.Text, depth+1)
+				}
+			}
+		}
+
+		e.popPath()
 	}
 	if multi {
-		e.buf.WriteByte('\n')
+		if !lastFootEmitted {
+			e.buf.WriteByte('\n')
+		}
 		e.writeIndent(depth)
 	}
 	e.buf.WriteByte(']')
@@ -812,28 +916,63 @@ func (e *encoder) encodeMap(rv reflect.Value, depth int) error {
 	if multi {
 		e.buf.WriteByte('\n')
 	}
+	lastFootEmitted := false
 	for i, p := range pairs {
+		e.pushPathKey(p.keyStr)
+
+		if multi && !e.opts.strictJSONOutput {
+			for _, c := range e.commentsAt(HeadCommentPos) {
+				e.writeCommentBlock(c.Text, depth+1)
+			}
+		}
+
 		if multi {
 			e.writeIndent(depth + 1)
 		}
 		e.writeQuotedString(p.keyStr)
 		e.buf.WriteString(": ")
 		if err := e.encodeValue(p.val, depth+1); err != nil {
+			e.popPath()
 			return err
 		}
-		if i < len(pairs)-1 {
+
+		isLast := i == len(pairs)-1
+		switch {
+		case !isLast:
 			e.buf.WriteByte(',')
+		case multi && e.opts.trailingComma && !e.opts.strictJSONOutput:
+			e.buf.WriteByte(',')
+		}
+		if multi && !e.opts.strictJSONOutput {
+			e.emitInlineComments(e.commentsAt(LineCommentPos))
+		}
+		if !isLast {
 			if multi {
 				e.buf.WriteByte('\n')
 			} else {
 				e.buf.WriteByte(' ')
 			}
-		} else if multi && e.opts.trailingComma && !e.opts.strictJSONOutput {
-			e.buf.WriteByte(',')
 		}
+
+		if multi && !e.opts.strictJSONOutput {
+			feet := e.commentsAt(FootCommentPos)
+			if len(feet) > 0 {
+				if isLast {
+					e.buf.WriteByte('\n')
+					lastFootEmitted = true
+				}
+				for _, c := range feet {
+					e.writeCommentBlock(c.Text, depth+1)
+				}
+			}
+		}
+
+		e.popPath()
 	}
 	if multi {
-		e.buf.WriteByte('\n')
+		if !lastFootEmitted {
+			e.buf.WriteByte('\n')
+		}
 		e.writeIndent(depth)
 	}
 	e.buf.WriteByte('}')
@@ -851,28 +990,63 @@ func (e *encoder) encodeMapSlice(ms MapSlice, depth int) error {
 	if multi {
 		e.buf.WriteByte('\n')
 	}
+	lastFootEmitted := false
 	for i, item := range ms {
+		e.pushPathKey(item.Key)
+
+		if multi && !e.opts.strictJSONOutput {
+			for _, c := range e.commentsAt(HeadCommentPos) {
+				e.writeCommentBlock(c.Text, depth+1)
+			}
+		}
+
 		if multi {
 			e.writeIndent(depth + 1)
 		}
 		e.writeQuotedString(item.Key)
 		e.buf.WriteString(": ")
 		if err := e.encodeValue(reflect.ValueOf(item.Value), depth+1); err != nil {
+			e.popPath()
 			return err
 		}
-		if i < len(ms)-1 {
+
+		isLast := i == len(ms)-1
+		switch {
+		case !isLast:
 			e.buf.WriteByte(',')
+		case multi && e.opts.trailingComma && !e.opts.strictJSONOutput:
+			e.buf.WriteByte(',')
+		}
+		if multi && !e.opts.strictJSONOutput {
+			e.emitInlineComments(e.commentsAt(LineCommentPos))
+		}
+		if !isLast {
 			if multi {
 				e.buf.WriteByte('\n')
 			} else {
 				e.buf.WriteByte(' ')
 			}
-		} else if multi && e.opts.trailingComma && !e.opts.strictJSONOutput {
-			e.buf.WriteByte(',')
 		}
+
+		if multi && !e.opts.strictJSONOutput {
+			feet := e.commentsAt(FootCommentPos)
+			if len(feet) > 0 {
+				if isLast {
+					e.buf.WriteByte('\n')
+					lastFootEmitted = true
+				}
+				for _, c := range feet {
+					e.writeCommentBlock(c.Text, depth+1)
+				}
+			}
+		}
+
+		e.popPath()
 	}
 	if multi {
-		e.buf.WriteByte('\n')
+		if !lastFootEmitted {
+			e.buf.WriteByte('\n')
+		}
 		e.writeIndent(depth)
 	}
 	e.buf.WriteByte('}')
@@ -957,53 +1131,104 @@ func (e *encoder) encodeStruct(rv reflect.Value, depth int) error {
 	if multi {
 		e.buf.WriteByte('\n')
 	}
+
+	// lastFootEmitted is set when a foot comment from WithComment was
+	// emitted after the final member. In that case the comment block
+	// already ends in '\n' so the closing brace block must skip its own
+	// leading newline to avoid a blank line before '}'.
+	lastFootEmitted := false
+
 	for i, em := range emits {
-		// Emit comment header (from `comment:"..."` tag) on its own line(s)
-		// when multi-line.
-		if multi && em.comment != "" && !e.opts.strictJSONOutput {
-			e.writeCommentBlock(em.comment, depth+1)
+		e.pushPathKey(em.fi.name)
+
+		// Head comments: from WithComment first, then from the `comment` tag.
+		if multi && !e.opts.strictJSONOutput {
+			for _, c := range e.commentsAt(HeadCommentPos) {
+				e.writeCommentBlock(c.Text, depth+1)
+			}
+			if em.comment != "" {
+				e.writeCommentBlock(em.comment, depth+1)
+			}
 		}
+
 		if multi {
 			e.writeIndent(depth + 1)
 		}
 		e.writeQuotedString(em.fi.name)
 		e.buf.WriteString(": ")
 
-		if em.fi.commented && !e.opts.strictJSONOutput {
-			// Emit the value preceded by "//" so it is a comment in source —
-			// requires multi-line output to be meaningful.
-			if multi {
-				e.buf.WriteString("/* ")
-				if err := e.encodeFieldValue(em.fi, em.val, depth+1); err != nil {
-					return err
-				}
-				e.buf.WriteString(" */")
-				if i < len(emits)-1 {
-					// commented members produce no trailing comma since they
-					// have no value position; emit nothing.
-					_ = i
-				}
-				e.buf.WriteByte('\n')
-				continue
+		if em.fi.commented && !e.opts.strictJSONOutput && multi {
+			// The `commented` jsonc tag option emits the value as a /* … */
+			// placeholder in multi-line output. This path doesn't honor
+			// inline/foot WithComment annotations because there is no
+			// value-position to attach them to.
+			e.buf.WriteString("/* ")
+			if err := e.encodeFieldValue(em.fi, em.val, depth+1); err != nil {
+				e.popPath()
+				return err
 			}
+			e.buf.WriteString(" */")
+			e.buf.WriteByte('\n')
+			e.popPath()
+			continue
 		}
 
 		if err := e.encodeFieldValue(em.fi, em.val, depth+1); err != nil {
+			e.popPath()
 			return err
 		}
-		if i < len(emits)-1 {
+
+		isLast := i == len(emits)-1
+
+		// Comma immediately after value, before any inline comment. (Inline
+		// comments only render in multi-line, non-strict-output mode, but the
+		// ordering must hold either way: `value, // inline` not `value //
+		// inline,`.)
+		switch {
+		case !isLast:
 			e.buf.WriteByte(',')
+		case multi && e.opts.trailingComma && !e.opts.strictJSONOutput:
+			e.buf.WriteByte(',')
+		}
+
+		// Inline (line) comment: directly after the comma, before the newline.
+		if multi && !e.opts.strictJSONOutput {
+			e.emitInlineComments(e.commentsAt(LineCommentPos))
+		}
+
+		// Separator: newline for multi non-last, space for compact non-last.
+		// The closing-brace block handles the final newline for the last
+		// member.
+		if !isLast {
 			if multi {
 				e.buf.WriteByte('\n')
 			} else {
 				e.buf.WriteByte(' ')
 			}
-		} else if multi && e.opts.trailingComma && !e.opts.strictJSONOutput {
-			e.buf.WriteByte(',')
 		}
+
+		// Foot comments: appear after the newline (or, for the last
+		// member, on a fresh line before the closing brace).
+		if multi && !e.opts.strictJSONOutput {
+			feet := e.commentsAt(FootCommentPos)
+			if len(feet) > 0 {
+				if isLast {
+					e.buf.WriteByte('\n')
+					lastFootEmitted = true
+				}
+				for _, c := range feet {
+					e.writeCommentBlock(c.Text, depth+1)
+				}
+			}
+		}
+
+		e.popPath()
 	}
+
 	if multi {
-		e.buf.WriteByte('\n')
+		if !lastFootEmitted {
+			e.buf.WriteByte('\n')
+		}
 		e.writeIndent(depth)
 	}
 	e.buf.WriteByte('}')
