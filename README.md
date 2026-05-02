@@ -117,7 +117,7 @@ err := jsonc.Unmarshal(data, &v)
 
 Tags, custom marshalers, and `json.Number` / `json.RawMessage` continue to work unchanged. The only behavioral differences:
 
-- HTML escaping is off by default (use `WithEscapeHTML(true)` for parity).
+- **HTML escaping is OFF by default.** `encoding/json` escapes `<`, `>`, and `&` as `<`, `>`, `&` to be safe in HTML contexts; jsonc emits the raw characters because most config-file consumers are not HTML. Pass `WithEscapeHTML(true)` (or call `Encoder.SetEscapeHTML(true)`) for stdlib parity if your output is rendered in HTML.
 - `time.Duration` encodes as int64 nanoseconds, matching `encoding/json` (use `WithDurationAsString(true)` for `"1h30m"` output).
 
 ## Whole-Document Transformations

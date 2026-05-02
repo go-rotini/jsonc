@@ -32,7 +32,7 @@ Initial release of the `go-rotini/jsonc` package — a Go JSONC (JSON with Comme
 - Inf/NaN encoding rejected with `ErrUnsupportedValue` (matches stdlib).
 - Map key ordering: lexicographic by default (deterministic output); `MapSlice` preserves insertion order.
 - Struct field ordering matches `encoding/json` (declaration order, tag-renamed fields keep their position).
-- HTML escaping is **off** by default (the differs from `encoding/json` for cleaner output) — use `WithEscapeHTML(true)` for stdlib parity.
+- HTML escaping is **off** by default (this differs from `encoding/json` for cleaner output) — use `WithEscapeHTML(true)` for stdlib parity.
 - `WithComment(map[string][]Comment)` — path-keyed comment injection for reflection encoding. Path syntax matches the encoder's path stack (dot for object members, bracket for array indices: `server.port`, `tags[0]`, `users.alice.email`). Supports head, line, and foot positions. Honored only in multi-line, non-strict-output mode.
 - Comment emission hardening — inline comments fall back to `/* … */` when their text contains a newline or carriage return, instead of leaking past the value through a `//` comment that the embedded line terminator would close. `writeCommentBlock` normalizes `\r\n` and bare `\r` to `\n` before splitting. Block-form output sanitizes any embedded `*/` to `* /` so user-supplied `Comment.Text` cannot prematurely close the surrounding block. (Fixes a `FuzzFormat`-found regression on input `{}/*\r0*/`.)
 
@@ -68,6 +68,6 @@ Initial release of the `go-rotini/jsonc` package — a Go JSONC (JSON with Comme
 - Acceptance fixtures: tsconfig.json, vscode-settings.json, kitchen-sink.jsonc.
 - JSONTestSuite conformance harness (gated on cloned testdata; clones the latest of `master` via `make clone-test-suite`, matching the yaml/toml-package pattern of tracking the upstream test suite head).
 - Stdlib compatibility tests verifying parity with `encoding/json` for the standard JSON subset.
-- 14 runnable Examples for godoc rendering.
+- 15 runnable Examples for godoc rendering.
 
 [0.1.0]: https://github.com/go-rotini/jsonc/releases/tag/v0.1.0

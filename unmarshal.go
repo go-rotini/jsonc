@@ -93,15 +93,12 @@ func DecodeFile(path string, v any, opts ...DecodeOption) error {
 // multiple top-level values back-to-back from a single reader, matching
 // [encoding/json.Decoder] semantics.
 type Decoder struct {
-	r          io.Reader
-	opts       *decoderOptions
-	ctx        context.Context //nolint:containedctx // by design
-	buf        []byte          // unread portion of input (after the most recent decode)
-	loaded     bool            // true once we've read from r
-	useNumber  bool            // mirrored from opts for ergonomic methods
-	strict     bool            // mirrored from opts
-	inputBytes int64           // total bytes read so far
-	consumed   int64           // bytes consumed by previous decodes
+	r        io.Reader
+	opts     *decoderOptions
+	ctx      context.Context //nolint:containedctx // by design
+	buf      []byte          // unread portion of input (after the most recent decode)
+	loaded   bool            // true once we've read from r
+	consumed int64           // bytes consumed by previous decodes
 }
 
 // NewDecoder creates a [Decoder] that reads from r.
@@ -111,11 +108,9 @@ func NewDecoder(r io.Reader, opts ...DecodeOption) *Decoder {
 		opt(o)
 	}
 	return &Decoder{
-		r:         r,
-		opts:      o,
-		ctx:       context.Background(),
-		useNumber: o.useNumber,
-		strict:    o.strict,
+		r:    r,
+		opts: o,
+		ctx:  context.Background(),
 	}
 }
 
@@ -180,7 +175,6 @@ func (dec *Decoder) ensureLoaded() error {
 		return fmt.Errorf("jsonc: %w", err)
 	}
 	dec.buf = data
-	dec.inputBytes = int64(len(data))
 	dec.loaded = true
 	return nil
 }
