@@ -64,21 +64,20 @@ func FuzzScanner(f *testing.F) {
 	})
 }
 
-// FuzzValid checks that [Valid] is consistent with [Unmarshal]: if Valid
-// returns true, Unmarshal into any must also succeed (and vice-versa for
-// false). The invariant is no panic plus this consistency.
+// FuzzValid checks that [Valid] (which is syntactic) is consistent with
+// [Parse]: when Valid returns true, Parse must also accept the input.
+// Unmarshal can still fail semantically — e.g., a number that's syntactically
+// valid but overflows float64 — so we don't compare against Unmarshal here.
 func FuzzValid(f *testing.F) {
 	addFuzzSeeds(f)
 	f.Fuzz(func(t *testing.T, data []byte) {
 		valid := Valid(data)
-		var v any
-		err := Unmarshal(data, &v)
-		// Allow asymmetric mismatch only in the direction where Valid says
-		// "no" and Unmarshal accepts (e.g., comments-only input may be
-		// accepted by neither). We assert: if Valid is true, Unmarshal is
-		// expected to succeed.
-		if valid && err != nil {
-			t.Errorf("Valid=true but Unmarshal err=%v\nsrc=%q", err, data)
+		_, parseErr := Parse(data)
+		switch {
+		case valid && parseErr != nil:
+			t.Errorf("Valid=true but Parse err=%v\nsrc=%q", parseErr, data)
+		case !valid && parseErr == nil:
+			t.Errorf("Valid=false but Parse succeeded\nsrc=%q", data)
 		}
 	})
 }

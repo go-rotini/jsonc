@@ -5,9 +5,10 @@ JSONTEST_REPO := https://github.com/nst/JSONTestSuite.git
 JSONTEST_REF  := 1ef36fa01286573e846ac449e8683f8833c5b26a
 
 # tailscale/hujson — pin to a specific commit for reproducibility.
+# Update the pin intentionally (with a CHANGELOG note) when bumping.
 HUJSON_DIR    := testdata/hujson-testdata
 HUJSON_REPO   := https://github.com/tailscale/hujson.git
-HUJSON_REF    := main
+HUJSON_REF    := ecc657c15afd43d89afe7ce64dd0ad160f23f8b4
 
 .PHONY: all clean clone-test-suites lint test test-acceptance test-bench \
         test-conformance test-fuzz test-mutation test-race
@@ -25,10 +26,12 @@ $(JSONTEST_DIR):
 	@cd $(JSONTEST_DIR) && git checkout --quiet $(JSONTEST_REF)
 
 $(HUJSON_DIR):
-	@git clone --quiet --depth 1 --branch $(HUJSON_REF) $(HUJSON_REPO) $(HUJSON_DIR)
+	@git clone --quiet $(HUJSON_REPO) $(HUJSON_DIR)
+	@cd $(HUJSON_DIR) && git checkout --quiet $(HUJSON_REF)
 
 lint:
-	@test -z "$$(gofmt -l .)" || (echo "files not formatted:" && gofmt -l . && exit 1)
+	@gofmt_unformatted=$$(gofmt -l . 2>/dev/null | grep -v '^testdata/' || true); \
+	test -z "$$gofmt_unformatted" || (echo "files not formatted:" && echo "$$gofmt_unformatted" && exit 1)
 	go vet ./...
 	go mod verify
 	go tool golangci-lint run ./...

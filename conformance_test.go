@@ -100,7 +100,14 @@ func TestJSONTestSuite(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, parseErr := jsonc.Parse(data, jsonc.WithStrictJSON())
+			// Allow duplicate keys: RFC 8259 leaves their handling
+			// unspecified, JSONTestSuite considers them "must accept", and
+			// encoding/json accepts them (last-wins). Without this we'd fail
+			// y_object_duplicated_key and y_object_duplicated_key_and_value.
+			_, parseErr := jsonc.Parse(data,
+				jsonc.WithStrictJSON(),
+				jsonc.WithAllowDuplicateKeys(),
+			)
 			switch {
 			case strings.HasPrefix(name, "y_"):
 				if parseErr != nil {
