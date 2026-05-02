@@ -465,3 +465,92 @@ func TestValidFunction(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Token.String exercised via parse error formatting and direct iteration.
+// ---------------------------------------------------------------------------
+
+func TestTokenStringErrorFormatting(t *testing.T) {
+	// Each error kind eventually formats a token via tk.String() — exercise
+	// the path by parsing inputs that fail at different token positions.
+	cases := []string{
+		`[1 2 3]`,  // missing comma
+		`{"a" 1}`,  // missing colon
+		`{1: "x"}`, // non-string key
+		`,`,        // bare separator
+		`}`,        // bare close
+	}
+	for _, src := range cases {
+		var v any
+		if err := Unmarshal([]byte(src), &v); err == nil {
+			t.Errorf("%q: expected error", src)
+		}
+	}
+}
+
+func TestTokenStringCoverage(t *testing.T) {
+	// Direct kind enumeration through token.String() — ensure no panic
+	// and a non-empty result for every kind.
+	kinds := []tokenKind{
+		tokenError, tokenStreamStart, tokenStreamEnd,
+		tokenObjectStart, tokenObjectEnd, tokenArrayStart, tokenArrayEnd,
+		tokenNameSeparator, tokenValueSeparator,
+		tokenString, tokenNumber, tokenTrue, tokenFalse, tokenNull,
+		tokenLineComment, tokenBlockComment, tokenNewline, tokenEOF,
+	}
+	seen := make(map[string]bool)
+	for _, k := range kinds {
+		tk := token{kind: k}
+		s := tk.String()
+		if s == "" {
+			t.Errorf("kind %v produced empty String()", k)
+		}
+		seen[s] = true
+	}
+	if len(seen) < 10 {
+		t.Errorf("expected at least 10 distinct token names, got %d", len(seen))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scanner BOM handling — mid-stream BOM is not stripped.
+// ---------------------------------------------------------------------------
+
+func TestScannerStripBOMAtNonZeroOffsetIgnored(t *testing.T) {
+	// BOM only stripped at byte 0; mid-stream BOM is just a Unicode char.
+	src := "{\xef\xbb\xbf\"a\":1}"
+	// BOM at position 1 is invalid in structural position.
+	var v any
+	if err := Unmarshal([]byte(src), &v); err == nil {
+		t.Error("expected error on mid-stream BOM in structural position")
+	}
+}
+
+func TestScannerBOMPlusContent(t *testing.T) {
+	src := "\xef\xbb\xbf{\"a\":1}"
+	var v map[string]int
+	if err := Unmarshal([]byte(src), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v["a"] != 1 {
+		t.Errorf("got %+v", v)
+	}
+}
+
+// scanner.stripBOM — non-BOM input passes through.
+func TestScannerNoBOMShortInput(t *testing.T) {
+	if !Valid([]byte("1")) {
+		t.Error("Valid for '1' should be true")
+	}
+	// Empty input — scanner accepts no-content but parser rejects.
+	_ = Valid(nil)
+}
+
+func TestScannerEmptyInput(t *testing.T) {
+	if Valid(nil) {
+		t.Error("Valid(nil) should be false (empty document not a value)")
+	}
+	if Valid([]byte{}) {
+		t.Error("Valid([]) should be false")
+	}
+}

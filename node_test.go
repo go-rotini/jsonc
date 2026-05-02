@@ -352,3 +352,256 @@ func TestNodeToBytesTrailingComma(t *testing.T) {
 		t.Errorf("trailing comma not emitted:\n%s", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// writeOrphanComment — orphan CommentNode children of containers.
+// ---------------------------------------------------------------------------
+
+func TestWriteOrphanCommentLineStyle(t *testing.T) {
+	root := &Node{
+		Kind: ArrayNode,
+		Children: []*Node{
+			{Kind: CommentNode, Value: " orphan line", CommentStyle: LineCommentStyle},
+			{Kind: NumberNode, Value: "1", RawValue: "1"},
+		},
+	}
+	out, err := NodeToBytesWithOptions(root, WithIndent("  "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "// orphan line") {
+		t.Errorf("expected orphan line comment, got %s", out)
+	}
+}
+
+func TestWriteOrphanCommentBlockStyle(t *testing.T) {
+	root := &Node{
+		Kind: ObjectNode,
+		Children: []*Node{
+			{Kind: CommentNode, Value: " orphan block ", CommentStyle: BlockCommentStyle},
+			{
+				Kind: KeyValueNode,
+				Key:  "a",
+				Children: []*Node{
+					{Kind: NumberNode, Value: "1", RawValue: "1"},
+				},
+			},
+		},
+	}
+	out, err := NodeToBytesWithOptions(root, WithIndent("  "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "/* orphan block */") {
+		t.Errorf("expected orphan block comment, got %s", out)
+	}
+}
+
+func TestEncodeOrphanCommentInsideArray(t *testing.T) {
+	root := &Node{
+		Kind: ArrayNode,
+		Children: []*Node{
+			{Kind: NumberNode, Value: "1", RawValue: "1"},
+			{Kind: CommentNode, Value: " between ", CommentStyle: BlockCommentStyle},
+			{Kind: NumberNode, Value: "2", RawValue: "2"},
+		},
+	}
+	out, err := NodeToBytesWithOptions(root, WithIndent("  "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "/* between */") {
+		t.Errorf("expected orphan block comment in array, got %s", out)
+	}
+}
+
+func TestEncodeASTCompactSkipsOrphanComments(t *testing.T) {
+	root := &Node{
+		Kind: ArrayNode,
+		Children: []*Node{
+			{Kind: CommentNode, Value: " skip ", CommentStyle: BlockCommentStyle},
+			{Kind: NumberNode, Value: "1", RawValue: "1"},
+		},
+	}
+	out, err := NodeToBytes(root) // compact (no indent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "skip") {
+		t.Errorf("compact mode should skip orphan comments, got %s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Node.String / NodeKind.String over every kind.
+// ---------------------------------------------------------------------------
+
+func TestNodeStringEveryKind(t *testing.T) {
+	cases := []*Node{
+		{Kind: ObjectNode, Children: make([]*Node, 3)},
+		{Kind: ArrayNode, Children: make([]*Node, 5)},
+		{Kind: KeyValueNode, Key: "k"},
+		{Kind: StringNode, Value: "v", RawValue: `"v"`},
+		{Kind: NumberNode, Value: "42", RawValue: "42"},
+		{Kind: BooleanNode, Value: "true", RawValue: "true"},
+		{Kind: NullNode, Value: "null", RawValue: "null"},
+		{Kind: CommentNode, Value: " line ", CommentStyle: LineCommentStyle},
+		{Kind: CommentNode, Value: " block ", CommentStyle: BlockCommentStyle},
+	}
+	for _, n := range cases {
+		s := n.String()
+		if s == "" && n.Kind != 0 {
+			t.Errorf("empty String() for kind %v", n.Kind)
+		}
+	}
+}
+
+func TestNodeKindStringDirect(t *testing.T) {
+	cases := []struct {
+		kind NodeKind
+		want string
+	}{
+		{ObjectNode, "object"},
+		{ArrayNode, "array"},
+		{KeyValueNode, "key-value"},
+		{StringNode, "string"},
+		{NumberNode, "number"},
+		{BooleanNode, "boolean"},
+		{NullNode, "null"},
+		{CommentNode, "comment"},
+	}
+	for _, c := range cases {
+		if got := c.kind.String(); got != c.want {
+			t.Errorf("kind %d: got %q, want %q", int(c.kind), got, c.want)
+		}
+	}
+	// Default branch.
+	if got := NodeKind(99).String(); !strings.Contains(got, "99") {
+		t.Errorf("default branch: got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Walk visits and early stops.
+// ---------------------------------------------------------------------------
+
+func TestWalkVisitsCommentNode(t *testing.T) {
+	root := &Node{
+		Kind: ArrayNode,
+		Children: []*Node{
+			{Kind: CommentNode, Value: " line ", CommentStyle: LineCommentStyle},
+			{Kind: NumberNode, Value: "1", RawValue: "1"},
+		},
+	}
+	count := 0
+	Walk(root, func(_ *Node) bool {
+		count++
+		return true
+	})
+	if count != 3 {
+		t.Errorf("expected 3 visits (root + 2 children), got %d", count)
+	}
+}
+
+func TestWalkEarlyStop(t *testing.T) {
+	root := mustParseRoot(t, `{"a": {"b": {"c": 1}}}`)
+	count := 0
+	Walk(root, func(_ *Node) bool {
+		count++
+		return false // do not recurse
+	})
+	if count != 1 {
+		t.Errorf("expected 1 visit (root only), got %d", count)
+	}
+}
+
+func TestValidateOnValidTree(t *testing.T) {
+	root := mustParseRoot(t, `{"a": 1, "b": [1, 2, 3]}`)
+	if err := root.Validate(); err != nil {
+		t.Errorf("Validate on parsed input: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Hand-built AST emission corner cases.
+// ---------------------------------------------------------------------------
+
+func TestNodeBridgeImportExportRoundtrip(t *testing.T) {
+	// Build a public Node tree and round-trip through NodeToBytes → Parse.
+	pub := &Node{
+		Kind: ObjectNode,
+		Children: []*Node{
+			{
+				Kind: KeyValueNode,
+				Key:  "k",
+				Children: []*Node{
+					{Kind: StringNode, Value: "v", RawValue: `"v"`},
+				},
+				Comment:     "inline",
+				HeadComment: "head",
+				FootComment: "foot",
+			},
+		},
+	}
+	out, err := NodeToBytesWithOptions(pub, WithIndent("  "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse failed: %v\noutput:\n%s", err, out)
+	}
+	if f.Root.Kind != ObjectNode {
+		t.Errorf("expected ObjectNode, got %v", f.Root.Kind)
+	}
+}
+
+// nodeRawBytes — exercise container fallback path via NodeToBytes round-trip.
+func TestRawValueFromASTNoSourceBytes(t *testing.T) {
+	root := &Node{
+		Kind: ObjectNode,
+		Children: []*Node{
+			{
+				Kind:     KeyValueNode,
+				Key:      "k",
+				Children: []*Node{{Kind: NumberNode, Value: "1", RawValue: "1"}},
+			},
+		},
+	}
+	out, err := NodeToBytes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(out); err != nil {
+		t.Errorf("re-parse failed: %v", err)
+	}
+}
+
+// nodeRawBytes for a manually-built scalar with empty rawValue.
+func TestRawValueFromArtisanal(t *testing.T) {
+	pub := &Node{Kind: StringNode, Value: "hi"} // RawValue intentionally empty
+	out, err := NodeToBytes(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != `"hi"` {
+		t.Errorf("got %q", out)
+	}
+}
+
+// writeNode KeyValueNode with no children — emits "null".
+func TestEncodeASTKeyValueNodeWithoutChild(t *testing.T) {
+	root := &Node{
+		Kind: ObjectNode,
+		Children: []*Node{
+			{Kind: KeyValueNode, Key: "missing"}, // no children
+		},
+	}
+	out, err := NodeToBytes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"missing": null`) {
+		t.Errorf("expected null fallback for child-less KV, got %s", out)
+	}
+}

@@ -1,6 +1,7 @@
 package jsonc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -448,4 +449,434 @@ type errReader struct {
 
 func (r *errReader) Read(_ []byte) (int, error) {
 	return 0, r.err
+}
+
+// ---------------------------------------------------------------------------
+// Decoder limits: max depth / keys / nodes.
+// ---------------------------------------------------------------------------
+
+func TestDecoderMaxDepthExceeded(t *testing.T) {
+	// A deeply-nested array hits maxDepth.
+	deep := strings.Repeat("[", 200) + strings.Repeat("]", 200)
+	var v any
+	if err := UnmarshalWithOptions([]byte(deep), &v, WithMaxDepth(10)); err == nil {
+		t.Error("expected depth-limit error")
+	}
+}
+
+func TestDecoderMaxKeysExceeded(t *testing.T) {
+	src := `{"a":1,"b":2,"c":3,"d":4,"e":5}`
+	var v any
+	if err := UnmarshalWithOptions([]byte(src), &v, WithMaxKeys(3)); err == nil {
+		t.Error("expected max-keys error")
+	}
+}
+
+func TestDecoderMaxNodesExceeded(t *testing.T) {
+	src := `[1,2,3,4,5,6,7,8,9,10]`
+	var v any
+	if err := UnmarshalWithOptions([]byte(src), &v, WithMaxNodes(3)); err == nil {
+		t.Error("expected max-nodes error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Decoder.InputOffset returns consumed bytes after a Decode.
+// ---------------------------------------------------------------------------
+
+func TestDecoderInputOffsetReturnsConsumedBytes(t *testing.T) {
+	src := `42 99`
+	dec := NewDecoder(bytes.NewReader([]byte(src)))
+	var n int
+	if err := dec.Decode(&n); err != nil {
+		t.Fatal(err)
+	}
+	off := dec.InputOffset()
+	if off == 0 {
+		t.Error("expected nonzero input offset after first decode")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Ordered maps with comment children.
+// ---------------------------------------------------------------------------
+
+func TestUnmarshalOrderedMapWithCommentChildren(t *testing.T) {
+	src := `{
+		// before a
+		"a": 1,
+		/* between */
+		"b": 2
+	}`
+	var v any
+	if err := UnmarshalWithOptions([]byte(src), &v, WithOrderedMap()); err != nil {
+		t.Fatal(err)
+	}
+	ms, ok := v.(MapSlice)
+	if !ok {
+		t.Fatalf("expected MapSlice, got %T", v)
+	}
+	if len(ms) != 2 || ms[0].Key != "a" || ms[1].Key != "b" {
+		t.Errorf("got %+v", ms)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Strict mode propagation through nested struct fields.
+// ---------------------------------------------------------------------------
+
+func TestStrictModeWithUnknownNestedField(t *testing.T) {
+	type Inner struct {
+		Known string `json:"known"`
+	}
+	type Outer struct {
+		Inner Inner `json:"inner"`
+	}
+	src := `{"inner": {"known": "x", "unexpected": 1}}`
+	var v Outer
+	err := UnmarshalWithOptions([]byte(src), &v, WithStrict())
+	var ufe *UnknownFieldError
+	if !errors.As(err, &ufe) {
+		t.Errorf("expected *UnknownFieldError, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Decoder.More / EOF handling.
+// ---------------------------------------------------------------------------
+
+func TestDecoderMoreAfterEOF(t *testing.T) {
+	dec := NewDecoder(strings.NewReader(`1`))
+	var n int
+	if err := dec.Decode(&n); err != nil {
+		t.Fatal(err)
+	}
+	if dec.More() {
+		t.Error("More should be false after consuming all values")
+	}
+	// Second decode returns EOF.
+	if err := dec.Decode(&n); err == nil {
+		t.Error("expected EOF on second decode")
+	}
+}
+
+func TestDecoderMoreSkipsLeadingComments(t *testing.T) {
+	src := "// header\n42\n// footer\n"
+	dec := NewDecoder(strings.NewReader(src))
+	if !dec.More() {
+		t.Error("More should be true with a value present after leading comment")
+	}
+	var n int
+	if err := dec.Decode(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 42 {
+		t.Errorf("got %d", n)
+	}
+}
+
+func TestDecoderMoreFalseAfterLeadingCommentOnly(t *testing.T) {
+	dec := NewDecoder(strings.NewReader("// just a comment\n"))
+	if dec.More() {
+		t.Error("More should be false when only comments remain")
+	}
+}
+
+func TestDecoderMultipleValuesWithCommentsBetween(t *testing.T) {
+	src := "// header\n1\n// between\n2\n// after\n"
+	dec := NewDecoder(strings.NewReader(src))
+	var got []int
+	for dec.More() {
+		var n int
+		if err := dec.Decode(&n); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, n)
+	}
+	if len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestDecoderEmptyReaderEOF(t *testing.T) {
+	dec := NewDecoder(bytes.NewReader(nil))
+	var v any
+	if err := dec.Decode(&v); err == nil {
+		t.Error("expected EOF on empty reader")
+	}
+}
+
+func TestDecoderEmptyBuffer(t *testing.T) {
+	dec := NewDecoder(strings.NewReader(""))
+	if dec.More() {
+		t.Error("More on empty stream should be false")
+	}
+}
+
+func TestDecoderMoreOnReaderError(t *testing.T) {
+	dec := NewDecoder(&errReader{err: errors.New("io boom")})
+	if dec.More() {
+		t.Error("More on a failing reader should be false")
+	}
+}
+
+func TestDecoderInlineCommentBeforeValue(t *testing.T) {
+	src := `/* head */ 42`
+	dec := NewDecoder(strings.NewReader(src))
+	var n int
+	if err := dec.Decode(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 42 {
+		t.Errorf("got %d", n)
+	}
+}
+
+func TestDecoderMoreWithOnlyWhitespace(t *testing.T) {
+	dec := NewDecoder(strings.NewReader("   \n\t  "))
+	if dec.More() {
+		t.Error("More on whitespace-only stream should be false")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Decoder.SetContext propagates value to UnmarshalerContext.
+// ---------------------------------------------------------------------------
+
+type ctxDecodingHolder struct {
+	Got string
+}
+
+func (c *ctxDecodingHolder) UnmarshalJSONC(ctx context.Context, unmarshal func(any) error) error {
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return err
+	}
+	if v := ctx.Value(ctxKey{}); v != nil {
+		c.Got = v.(string) + "+" + s
+	} else {
+		c.Got = s
+	}
+	return nil
+}
+
+func TestDecoderSetContextPropagates(t *testing.T) {
+	dec := NewDecoder(strings.NewReader(`"hello"`))
+	dec.SetContext(context.WithValue(context.Background(), ctxKey{}, "ctx"))
+	var c ctxDecodingHolder
+	if err := dec.Decode(&c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Got != "ctx+hello" {
+		t.Errorf("got %q", c.Got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Top-level Unmarshal dispatches to UnmarshalerContext.
+// ---------------------------------------------------------------------------
+
+type ctxRecv struct {
+	S string
+}
+
+func (c *ctxRecv) UnmarshalJSONC(_ context.Context, unmarshal func(any) error) error {
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return err
+	}
+	c.S = "ctx:" + s
+	return nil
+}
+
+func TestUnmarshalViaContextInterface(t *testing.T) {
+	var c ctxRecv
+	if err := Unmarshal([]byte(`"v"`), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.S != "ctx:v" {
+		t.Errorf("got %q", c.S)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// WithCustomUnmarshaler option.
+// ---------------------------------------------------------------------------
+
+type CustomU struct {
+	Tag string
+}
+
+func TestCustomUnmarshalerOption(t *testing.T) {
+	opt := WithCustomUnmarshaler(func(c *CustomU, data []byte) error {
+		c.Tag = "custom:" + string(data)
+		return nil
+	})
+	var c CustomU
+	if err := UnmarshalWithOptions([]byte(`"hello"`), &c, opt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(c.Tag, "hello") {
+		t.Errorf("got %+v", c)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// StructValidator integration.
+// ---------------------------------------------------------------------------
+
+type rejectingValidator struct{}
+
+func (rejectingValidator) Struct(_ any) error {
+	return errors.New("validator says no")
+}
+
+func TestStructValidatorRejects(t *testing.T) {
+	type S struct {
+		V int `json:"v"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte(`{"v": 1}`), &s, WithValidator(rejectingValidator{}))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected ValidationError, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Required tag presence semantics.
+// ---------------------------------------------------------------------------
+
+func TestRequiredTagMissingKey(t *testing.T) {
+	type S struct {
+		V int `json:"v" jsonc:",required"`
+	}
+	var s S
+	err := Unmarshal([]byte(`{}`), &s)
+	if err == nil {
+		t.Error("expected required error")
+	}
+}
+
+func TestRequiredTagNullSatisfies(t *testing.T) {
+	type S struct {
+		V *int `json:"v" jsonc:",required"`
+	}
+	var s S
+	if err := Unmarshal([]byte(`{"v": null}`), &s); err != nil {
+		t.Errorf("null should satisfy required: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RawValue lifecycle through Unmarshal.
+// ---------------------------------------------------------------------------
+
+func TestRawValueScalar(t *testing.T) {
+	type S struct {
+		N RawValue `json:"n"`
+	}
+	src := `{"n": 42}`
+	var s S
+	if err := Unmarshal([]byte(src), &s); err != nil {
+		t.Fatal(err)
+	}
+	if string(s.N) != "42" {
+		t.Errorf("got %q", s.N)
+	}
+}
+
+func TestRawValueBoolean(t *testing.T) {
+	type S struct {
+		B RawValue `json:"b"`
+	}
+	src := `{"b": true}`
+	var s S
+	if err := Unmarshal([]byte(src), &s); err != nil {
+		t.Fatal(err)
+	}
+	if string(s.B) != "true" {
+		t.Errorf("got %q", s.B)
+	}
+}
+
+func TestRawValueNull(t *testing.T) {
+	type S struct {
+		Z RawValue `json:"z"`
+	}
+	src := `{"z": null}`
+	var s S
+	if err := Unmarshal([]byte(src), &s); err != nil {
+		t.Fatal(err)
+	}
+	if string(s.Z) != "null" {
+		t.Errorf("got %q", s.Z)
+	}
+}
+
+type rawScalar struct {
+	N RawValue `json:"n"`
+	S RawValue `json:"s"`
+	B RawValue `json:"b"`
+	Z RawValue `json:"z"`
+}
+
+func TestRawValueAllScalarKinds(t *testing.T) {
+	src := `{"n": 42, "s": "hello", "b": true, "z": null}`
+	var v rawScalar
+	if err := Unmarshal([]byte(src), &v); err != nil {
+		t.Fatal(err)
+	}
+	if string(v.N) != "42" || string(v.S) != `"hello"` || string(v.B) != "true" || string(v.Z) != "null" {
+		t.Errorf("got %+v", v)
+	}
+}
+
+type embeddedRaw struct {
+	V RawValue `json:"v"`
+}
+
+func TestRawValueOnNumberWithFreshAST(t *testing.T) {
+	// Decode then encode RawValue forces nodeRawBytes paths.
+	src := `{"v": 1.5e10}`
+	var s embeddedRaw
+	if err := Unmarshal([]byte(src), &s); err != nil {
+		t.Fatal(err)
+	}
+	if string(s.V) != "1.5e10" {
+		t.Errorf("got %q", s.V)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Generic Unmarshal of nested objects into any.
+// ---------------------------------------------------------------------------
+
+func TestUnmarshalNestedObjectsIntoAny(t *testing.T) {
+	src := `{"a": {"b": {"c": [1, 2, [3, 4]]}}}`
+	var v any
+	if err := Unmarshal([]byte(src), &v); err != nil {
+		t.Fatal(err)
+	}
+	// Drill into nested map[string]any.
+	m := v.(map[string]any)
+	a := m["a"].(map[string]any)
+	b := a["b"].(map[string]any)
+	c := b["c"].([]any)
+	if len(c) != 3 {
+		t.Errorf("expected 3 elements, got %d", len(c))
+	}
+}
+
+func TestUnmarshalEmptyObjectWithCommentsOnly(t *testing.T) {
+	src := `{
+		// only a comment, no members
+	}`
+	var v map[string]any
+	if err := Unmarshal([]byte(src), &v); err != nil {
+		t.Fatal(err)
+	}
+	if len(v) != 0 {
+		t.Errorf("expected empty map, got %+v", v)
+	}
 }

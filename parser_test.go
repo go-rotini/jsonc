@@ -397,3 +397,91 @@ func TestParseValidIntegration(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Document size limits and trailing trivia.
+// ---------------------------------------------------------------------------
+
+func TestParseDocumentSizeLimit(t *testing.T) {
+	src := strings.Repeat("a", 100)
+	_, err := Parse([]byte(src), WithMaxDocumentSize(50))
+	if !errors.Is(err, ErrDocumentSize) {
+		t.Errorf("expected ErrDocumentSize, got %v", err)
+	}
+}
+
+func TestParseRespectsMaxDocumentSize(t *testing.T) {
+	if _, err := Parse([]byte(`{"x": 1}`), WithMaxDocumentSize(2)); err == nil {
+		t.Error("expected size error")
+	}
+}
+
+func TestParseLimitsCombined(t *testing.T) {
+	if _, err := Parse([]byte(`{"a": 1}`), WithMaxKeys(0)); err != nil {
+		// Zero means no limit — should succeed.
+		t.Errorf("MaxKeys=0 should mean unlimited: %v", err)
+	}
+	if _, err := Parse([]byte(`[1,2,3]`), WithMaxNodes(0)); err != nil {
+		// Zero means no limit.
+		t.Errorf("MaxNodes=0 should mean unlimited: %v", err)
+	}
+}
+
+func TestParseTrailingWhitespaceAccepted(t *testing.T) {
+	if _, err := Parse([]byte(`42   `)); err != nil {
+		t.Errorf("trailing whitespace should be accepted: %v", err)
+	}
+	if _, err := Parse([]byte(`42 // comment`)); err != nil {
+		t.Errorf("trailing comment should be accepted: %v", err)
+	}
+}
+
+func TestParseEmptyDocumentAfterBOM(t *testing.T) {
+	if _, err := Parse([]byte("\xef\xbb\xbf")); err == nil {
+		t.Error("expected error: empty document after BOM")
+	}
+}
+
+func TestParseInputWithoutBOM(t *testing.T) {
+	if _, err := Parse([]byte(`42`)); err != nil {
+		t.Errorf("Parse without BOM: %v", err)
+	}
+}
+
+func TestParsePartialBOMBytes(t *testing.T) {
+	// Just `\xef\xbb` — incomplete BOM, scanner should reject.
+	if _, err := Parse([]byte{0xef, 0xbb}); err == nil {
+		t.Error("expected error on partial BOM")
+	}
+}
+
+func TestParseLayeredCommentBlocks(t *testing.T) {
+	src := `// first
+	// second
+	// third
+	{
+	  "k": 1
+	}`
+	if _, err := Parse([]byte(src)); err != nil {
+		t.Errorf("layered comments: %v", err)
+	}
+}
+
+func TestParseStringErrorInKey(t *testing.T) {
+	src := `{"\x00bad": 1}`
+	if _, err := Parse([]byte(src)); err == nil {
+		t.Error("expected parse error on malformed key")
+	}
+}
+
+func TestParseTrailingTokenInArray(t *testing.T) {
+	if _, err := Parse([]byte(`[1, 2`)); err == nil {
+		t.Error("expected unterminated array")
+	}
+}
+
+func TestParseStringInvalidEscapeInArrayElement(t *testing.T) {
+	if _, err := Parse([]byte(`["\q"]`)); err == nil {
+		t.Error("expected invalid escape error")
+	}
+}

@@ -389,3 +389,29 @@ func TestFormatErrorColumnPointerPosition(t *testing.T) {
 		t.Errorf("pointer line = %q, want caret", pointerLine)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// FormatError without Position passes through to err.Error().
+// ---------------------------------------------------------------------------
+
+func TestFormatErrorWithoutPos(t *testing.T) {
+	err := errors.New("plain error")
+	out := FormatError([]byte("data"), err)
+	if out != "plain error" {
+		t.Errorf("got %q", out)
+	}
+}
+
+// FormatError at column 1 — repeatByte(' ', 0) returns "".
+func TestFormatErrorAtFirstColumn(t *testing.T) {
+	src := []byte(`@`)
+	_, err := Parse(src)
+	if err == nil {
+		t.Skip("expected parse error")
+	}
+	out := FormatError(src, err)
+	// Position with column 1 → repeatByte(' ', 0) returns "".
+	if !strings.Contains(out, "@") {
+		t.Errorf("expected source line in output, got %q", out)
+	}
+}

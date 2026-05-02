@@ -928,3 +928,567 @@ func TestDecodeNonPointer(t *testing.T) {
 		t.Errorf("err = %v, want ErrNilPointer", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// nodeKindName — exercised by type errors against special-cased Go types.
+// ---------------------------------------------------------------------------
+
+func TestNodeKindNameForAllKinds(t *testing.T) {
+	// Decoding non-string into time.Time triggers nodeKindName via typeErrorf.
+	type S struct {
+		T time.Time `json:"t"`
+	}
+	cases := map[string]string{
+		`{"t": 42}`:      "number",
+		`{"t": true}`:    "boolean",
+		`{"t": null}`:    "null",
+		`{"t": [1]}`:     "array",
+		`{"t": {"a":1}}`: "object",
+	}
+	for src, want := range cases {
+		var s S
+		err := Unmarshal([]byte(src), &s)
+		if err == nil {
+			t.Errorf("%s: expected type error, got nil", src)
+			continue
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: expected error to mention %q, got %v", src, want, err)
+		}
+	}
+}
+
+func TestNodeKindNameForNumberIntoJSONNumber(t *testing.T) {
+	// Decoding non-number into json.Number also hits nodeKindName.
+	type S struct {
+		N Number `json:"n"`
+	}
+	var s S
+	err := Unmarshal([]byte(`{"n": "not a number"}`), &s)
+	if err == nil {
+		t.Fatal("expected type error")
+	}
+	if !strings.Contains(err.Error(), "string") {
+		t.Errorf("expected error to mention 'string', got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// numberToBigOrError — float-shaped into big.Int rejection, and bare type.
+// ---------------------------------------------------------------------------
+
+func TestDecodeFloatShapedIntoBigInt(t *testing.T) {
+	var bi *big.Int
+	if err := Unmarshal([]byte(`3.14`), &bi); err == nil {
+		t.Error("float-shaped number should not decode into *big.Int")
+	}
+}
+
+func TestDecodeIntoBigFloatValue(t *testing.T) {
+	// Decoding into a value-type big.Float (not pointer) goes through
+	// numberToBigOrError's big.Float case.
+	var bf big.Float
+	if err := Unmarshal([]byte(`2.71828`), &bf); err != nil {
+		t.Fatal(err)
+	}
+	if bf.Sign() <= 0 {
+		t.Errorf("decoded value should be positive, got %v", &bf)
+	}
+}
+
+func TestDecodeNumberIntoUnsupportedType(t *testing.T) {
+	type Custom struct{ N int }
+	var c Custom
+	// Decoding a number into a struct should hit the default branch.
+	if err := Unmarshal([]byte(`42`), &c); err == nil {
+		t.Error("expected type error decoding number into struct")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// applyDefault — every supported kind.
+// ---------------------------------------------------------------------------
+
+func TestDecodeApplyDefaultsAllKinds(t *testing.T) {
+	type S struct {
+		B  bool          `jsonc:"b,default=true"`
+		I  int           `jsonc:"i,default=42"`
+		I8 int8          `jsonc:"i8,default=7"`
+		U  uint          `jsonc:"u,default=99"`
+		U8 uint8         `jsonc:"u8,default=200"`
+		F  float64       `jsonc:"f,default=3.14"`
+		S  string        `jsonc:"s,default=hello"`
+		D  time.Duration `jsonc:"d,default=1500ms"`
+	}
+	var v S
+	if err := UnmarshalWithOptions([]byte(`{}`), &v, WithDefaults()); err != nil {
+		t.Fatal(err)
+	}
+	switch {
+	case !v.B, v.I != 42, v.I8 != 7, v.U != 99, v.U8 != 200, v.F != 3.14,
+		v.S != "hello", v.D != 1500*time.Millisecond:
+		t.Errorf("defaults not applied: %+v", v)
+	}
+}
+
+func TestDecodeApplyDefaultInvalid(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		into any
+	}{
+		{"bad bool", `{}`, &struct {
+			B bool `jsonc:"b,default=notabool"`
+		}{}},
+		{"bad int", `{}`, &struct {
+			N int `jsonc:"n,default=xyz"`
+		}{}},
+		{"bad uint", `{}`, &struct {
+			N uint `jsonc:"n,default=neg"`
+		}{}},
+		{"bad float", `{}`, &struct {
+			F float64 `jsonc:"f,default=word"`
+		}{}},
+		{"bad duration", `{}`, &struct {
+			D time.Duration `jsonc:"d,default=hello"`
+		}{}},
+	}
+	for _, c := range cases {
+		err := UnmarshalWithOptions([]byte(c.src), c.into, WithDefaults())
+		if err == nil {
+			t.Errorf("%s: expected error, got nil", c.name)
+		}
+	}
+}
+
+func TestDecodeApplyDefaultOverflow(t *testing.T) {
+	type S struct {
+		N int8 `jsonc:"n,default=999"`
+	}
+	var v S
+	err := UnmarshalWithOptions([]byte(`{}`), &v, WithDefaults())
+	if err == nil {
+		t.Error("expected overflow error in default")
+	}
+}
+
+func TestDecodeApplyDefaultUnsupportedKind(t *testing.T) {
+	type S struct {
+		Items []int `jsonc:"items,default=[1,2,3]"`
+	}
+	var v S
+	err := UnmarshalWithOptions([]byte(`{}`), &v, WithDefaults())
+	if err == nil {
+		t.Error("expected error: default not supported for slice kind")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildMapKey — every supported key type.
+// ---------------------------------------------------------------------------
+
+func TestDecodeMapWithIntegerKeyOverflow(t *testing.T) {
+	var m map[int8]string
+	err := Unmarshal([]byte(`{"999": "x"}`), &m)
+	if err == nil {
+		t.Error("expected overflow on int8 key")
+	}
+}
+
+func TestDecodeMapWithUnsignedKey(t *testing.T) {
+	var m map[uint]string
+	if err := Unmarshal([]byte(`{"42": "x"}`), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m[42] != "x" {
+		t.Errorf("got %+v", m)
+	}
+}
+
+func TestDecodeMapWithUnsignedKeyOverflow(t *testing.T) {
+	var m map[uint8]string
+	err := Unmarshal([]byte(`{"999": "x"}`), &m)
+	if err == nil {
+		t.Error("expected overflow on uint8 key")
+	}
+}
+
+func TestDecodeMapWithMalformedIntKey(t *testing.T) {
+	var m map[int]string
+	err := Unmarshal([]byte(`{"abc": "x"}`), &m)
+	if err == nil {
+		t.Error("expected error on non-numeric int key")
+	}
+}
+
+func TestDecodeMapWithMalformedUintKey(t *testing.T) {
+	var m map[uint]string
+	err := Unmarshal([]byte(`{"-5": "x"}`), &m)
+	if err == nil {
+		t.Error("expected error on negative uint key")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// numberToInterface — float, integer, huge integer (overflow → float64).
+// ---------------------------------------------------------------------------
+
+func TestDecodeFloatIntoInterface(t *testing.T) {
+	var v any
+	if err := Unmarshal([]byte(`3.14`), &v); err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := v.(float64); !ok || f != 3.14 {
+		t.Errorf("got %v (%T)", v, v)
+	}
+}
+
+func TestDecodeIntegerIntoInterface(t *testing.T) {
+	var v any
+	if err := Unmarshal([]byte(`42`), &v); err != nil {
+		t.Fatal(err)
+	}
+	// Stdlib produces float64 for integers in interface{} mode.
+	if f, ok := v.(float64); !ok || f != 42 {
+		t.Errorf("got %v (%T)", v, v)
+	}
+}
+
+func TestDecodeIntoInterfaceHugeInteger(t *testing.T) {
+	var v any
+	src := `99999999999999999999` // overflows int64
+	if err := Unmarshal([]byte(src), &v); err != nil {
+		t.Fatal(err)
+	}
+	// Stdlib falls back to float64 on overflow.
+	if _, ok := v.(float64); !ok {
+		t.Errorf("expected float64 fallback, got %T", v)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pointer-of-pointer decoding.
+// ---------------------------------------------------------------------------
+
+func TestDecodeIntoDoublePointer(t *testing.T) {
+	var pp **int
+	if err := Unmarshal([]byte(`42`), &pp); err != nil {
+		t.Fatal(err)
+	}
+	if pp == nil || *pp == nil || **pp != 42 {
+		t.Errorf("got %v", pp)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// String escapes in unquoteString.
+// ---------------------------------------------------------------------------
+
+func TestDecodeAllStringEscapes(t *testing.T) {
+	src := `"\b\f\n\r\t\\\"\/A"`
+	var s string
+	if err := Unmarshal([]byte(src), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s != "\b\f\n\r\t\\\"/A" {
+		t.Errorf("got %q", s)
+	}
+}
+
+func TestDecodeInvalidStringEscape(t *testing.T) {
+	if err := Unmarshal([]byte(`"\x"`), new(string)); err == nil {
+		t.Error("expected error on \\x escape")
+	}
+	if err := Unmarshal([]byte(`"\u00"`), new(string)); err == nil {
+		t.Error("expected error on truncated \\u")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// decodeString — non-byte slice / bare int64 / invalid duration / struct.
+// ---------------------------------------------------------------------------
+
+func TestDecodeStringIntoNonByteSlice(t *testing.T) {
+	var v []int
+	err := Unmarshal([]byte(`"hello"`), &v)
+	if err == nil {
+		t.Error("expected type error decoding string into []int")
+	}
+}
+
+func TestDecodeStringIntoBareInt64(t *testing.T) {
+	var v int64
+	err := Unmarshal([]byte(`"hello"`), &v)
+	if err == nil {
+		t.Error("expected type error decoding string into bare int64")
+	}
+}
+
+func TestDecodeStringInvalidDuration(t *testing.T) {
+	var d time.Duration
+	err := Unmarshal([]byte(`"not-a-duration"`), &d)
+	if err == nil {
+		t.Error("expected duration parse error")
+	}
+}
+
+func TestDecodeStringIntoStruct(t *testing.T) {
+	type S struct{ V int }
+	var s S
+	err := Unmarshal([]byte(`"text"`), &s)
+	if err == nil {
+		t.Error("expected type error decoding string into struct")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// decodeNumber — into an unsupported kind (struct/map).
+// ---------------------------------------------------------------------------
+
+func TestDecodeNumberIntoMap(t *testing.T) {
+	var m map[string]int
+	err := Unmarshal([]byte(`42`), &m)
+	if err == nil {
+		t.Error("expected type error decoding number into map")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// decodeArray / decodeObject into unsupported targets.
+// ---------------------------------------------------------------------------
+
+func TestDecodeArrayIntoInterface(t *testing.T) {
+	var v any
+	if err := Unmarshal([]byte(`[1, "two", true, null]`), &v); err != nil {
+		t.Fatal(err)
+	}
+	arr, ok := v.([]any)
+	if !ok || len(arr) != 4 {
+		t.Errorf("got %v (%T)", v, v)
+	}
+}
+
+func TestDecodeArrayIntoMap(t *testing.T) {
+	var m map[string]int
+	err := Unmarshal([]byte(`[1, 2, 3]`), &m)
+	if err == nil {
+		t.Error("expected type error decoding array into map")
+	}
+}
+
+func TestDecodeObjectIntoSlice(t *testing.T) {
+	var s []int
+	err := Unmarshal([]byte(`{"a": 1}`), &s)
+	if err == nil {
+		t.Error("expected type error decoding object into []int")
+	}
+}
+
+func TestDecodeObjectIntoUnsupportedKeyMap(t *testing.T) {
+	type bad struct{}
+	var m map[bad]int
+	err := Unmarshal([]byte(`{"a": 1}`), &m)
+	if err == nil {
+		t.Error("expected error: unsupported map key type")
+	}
+}
+
+func TestDecodeNestedArrayInIface(t *testing.T) {
+	src := `[[1, 2], [3, 4]]`
+	var v any
+	if err := Unmarshal([]byte(src), &v); err != nil {
+		t.Fatal(err)
+	}
+	outer := v.([]any)
+	if len(outer) != 2 || len(outer[0].([]any)) != 2 {
+		t.Errorf("got %v", v)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// fieldByIndexAlloc — pointer-to-struct embedded field decoding.
+// ---------------------------------------------------------------------------
+
+func TestDecodeIntoPointerEmbeddedStructAllocates(t *testing.T) {
+	type Inner struct {
+		Val int `json:"val"`
+	}
+	type Outer struct {
+		*Inner
+		Tag string `json:"tag"`
+	}
+	src := `{"val": 7, "tag": "x"}`
+	var o Outer
+	if err := Unmarshal([]byte(src), &o); err != nil {
+		t.Fatal(err)
+	}
+	if o.Inner == nil || o.Inner.Val != 7 || o.Tag != "x" {
+		t.Errorf("got %+v", o)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TextUnmarshaler key in maps.
+// ---------------------------------------------------------------------------
+
+// textKey is a struct (not a string-kind alias) so the buildMapKey path
+// reaches the TextUnmarshaler branch instead of the early string-kind
+// branch (which matches stdlib semantics).
+type textKey struct {
+	Raw string
+}
+
+func (k *textKey) UnmarshalText(b []byte) error {
+	k.Raw = "k:" + string(b)
+	return nil
+}
+
+func TestDecodeMapWithTextUnmarshalerKey(t *testing.T) {
+	src := `{"alpha": 1, "beta": 2}`
+	var m map[textKey]int
+	if err := Unmarshal([]byte(src), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m[textKey{Raw: "k:alpha"}] != 1 || m[textKey{Raw: "k:beta"}] != 2 {
+		t.Errorf("got %+v", m)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Number overflow paths through strconv.
+// ---------------------------------------------------------------------------
+
+func TestDecodeIntOverflowParseInt(t *testing.T) {
+	var n int64
+	src := `99999999999999999999` // > 2^63 - 1
+	err := Unmarshal([]byte(src), &n)
+	if err == nil {
+		t.Error("expected parse error on int64 overflow")
+	}
+}
+
+func TestDecodeUintOverflowParseUint(t *testing.T) {
+	var n uint64
+	src := `99999999999999999999999` // > 2^64 - 1
+	err := Unmarshal([]byte(src), &n)
+	if err == nil {
+		t.Error("expected parse error on uint64 overflow")
+	}
+}
+
+func TestDecodeFloatShapedIntoUint(t *testing.T) {
+	var n uint
+	err := Unmarshal([]byte(`1.5`), &n)
+	if err == nil {
+		t.Error("expected type error on float-shaped number into uint")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TextUnmarshaler as a struct field VALUE (not a map key).
+// ---------------------------------------------------------------------------
+
+type textValueField struct {
+	Raw string
+}
+
+func (t *textValueField) UnmarshalText(b []byte) error {
+	t.Raw = "tu:" + string(b)
+	return nil
+}
+
+func TestDecodeStringIntoTextUnmarshalerValue(t *testing.T) {
+	type Holder struct {
+		V textValueField `json:"v"`
+	}
+	var h Holder
+	if err := Unmarshal([]byte(`{"v": "hello"}`), &h); err != nil {
+		t.Fatal(err)
+	}
+	if h.V.Raw != "tu:hello" {
+		t.Errorf("got %+v", h)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Typed *big.Int field (json.Unmarshaler dispatch).
+// ---------------------------------------------------------------------------
+
+type bigIntField struct {
+	N *big.Int `json:"n"`
+}
+
+func TestDecodeBigIntField(t *testing.T) {
+	src := `{"n": 12345678901234567890123456789012}`
+	var s bigIntField
+	if err := Unmarshal([]byte(src), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.N == nil || s.N.String() != "12345678901234567890123456789012" {
+		t.Errorf("got %v", s.N)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Decode error propagation through array element / nested object member.
+// ---------------------------------------------------------------------------
+
+type strictDecode struct {
+	N int `json:"n"`
+}
+
+func TestDecodeArrayElementError(t *testing.T) {
+	// Array of strict structs; an element with a non-numeric "n" produces
+	// a type error that propagates through decodeArray's slice loop.
+	src := `[{"n": 1}, {"n": "bad"}]`
+	var arr []strictDecode
+	if err := Unmarshal([]byte(src), &arr); err == nil {
+		t.Error("expected type error from bad element")
+	}
+}
+
+func TestDecodeObjectMemberError(t *testing.T) {
+	type Inner struct {
+		N int `json:"n"`
+	}
+	type Outer struct {
+		I Inner `json:"i"`
+	}
+	src := `{"i": {"n": "not-a-number"}}`
+	var o Outer
+	if err := Unmarshal([]byte(src), &o); err == nil {
+		t.Error("expected nested type error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Nested type-error accumulation through a strongly-typed slice field.
+// ---------------------------------------------------------------------------
+
+type interfaceArrayHolder struct {
+	V []int `json:"v"`
+}
+
+func TestDecodeNestedTypeErrorAccumulates(t *testing.T) {
+	src := `{"v": [1, "two", 3]}`
+	var h interfaceArrayHolder
+	err := Unmarshal([]byte(src), &h)
+	// Type errors are accumulated; the second element fails.
+	if err == nil {
+		t.Error("expected accumulated type error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pointer to byte slice.
+// ---------------------------------------------------------------------------
+
+func TestDecodeIntoPointerToByteSlice(t *testing.T) {
+	var b *[]byte
+	if err := Unmarshal([]byte(`"aGVsbG8="`), &b); err != nil {
+		t.Fatal(err)
+	}
+	if b == nil || string(*b) != "hello" {
+		t.Errorf("got %v", b)
+	}
+}
