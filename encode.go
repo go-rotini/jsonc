@@ -6,6 +6,20 @@ import (
 	"strings"
 )
 
+// Marshaler is implemented by types that can encode themselves into raw
+// JSONC bytes. Existing [encoding/json.Marshaler] implementations are also
+// honored at lower priority, so types that already implement that interface
+// continue to work unchanged.
+type Marshaler interface {
+	MarshalJSONC() ([]byte, error)
+}
+
+// MarshalerContext is like [Marshaler] but receives a context, set via
+// [Encoder.EncodeContext].
+type MarshalerContext interface {
+	MarshalJSONC(ctx context.Context) ([]byte, error)
+}
+
 // encoder is the internal encoder. It will be expanded in Phase 7 with
 // reflection-based methods (encodeValue, encodeStruct, …); for now it
 // supports AST-based emission via [encoder.encodeNode] for the
