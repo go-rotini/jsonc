@@ -15,8 +15,11 @@ import (
 // ---------------------------------------------------------------------------
 
 // TestJSONCEdgeCases exercises the curated edge case corpus in
-// testdata/jsonc/. Each fixture must parse without error in JSONC mode and
-// round-trip cleanly through the AST encoder.
+// testdata/jsonc/. Filename convention controls the expected outcome:
+//
+//	reject_*.jsonc  — must fail to parse (asserts the rejection path)
+//	accept_*.jsonc  — must parse cleanly and survive ToJSON + strict-reparse
+//	(unprefixed)    — treated as accept_*
 func TestJSONCEdgeCases(t *testing.T) {
 	dir := "testdata/jsonc"
 	entries, err := os.ReadDir(dir)
@@ -24,20 +27,27 @@ func TestJSONCEdgeCases(t *testing.T) {
 		t.Skipf("edge case dir unavailable: %v", err)
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonc") && !strings.HasSuffix(e.Name(), ".json") {
+		name := e.Name()
+		if e.IsDir() || (!strings.HasSuffix(name, ".jsonc") && !strings.HasSuffix(name, ".json")) {
 			continue
 		}
-		path := filepath.Join(dir, e.Name())
-		t.Run(e.Name(), func(t *testing.T) {
+		path := filepath.Join(dir, name)
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
+			if strings.HasPrefix(name, "reject_") {
+				if _, err := jsonc.Parse(data); err == nil {
+					t.Fatalf("expected Parse to reject, got nil error")
+				}
+				return
+			}
+			// Accept path: parse + ToJSON + strict-reparse round-trip.
 			if _, err := jsonc.Parse(data); err != nil {
 				t.Fatalf("Parse: %v", err)
 			}
-			// ToJSON must always succeed for valid JSONC, producing strict JSON.
 			out, err := jsonc.ToJSON(data)
 			if err != nil {
 				t.Fatalf("ToJSON: %v", err)

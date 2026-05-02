@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{ /* head */ \"a\": 1, // inline\n  \"b\": [1, 2, 3,], }")

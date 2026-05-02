@@ -1,0 +1,8 @@
+{
+  "g_clef": "𝄞",
+  "smiling_face": "😀",
+  "snowman_bmp": "☃",
+  "mixed": "ASCII + 𝄞 + ☃ + 😀",
+  "lone_high_surrogate_replaced_with_FFFD": "\uD834",
+  "lone_low_surrogate_replaced_with_FFFD": "\uDD1E"
+}

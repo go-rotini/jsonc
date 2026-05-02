@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("[1, \"two\", true, null, {\"k\":\"v\"}, [1,2]]")
