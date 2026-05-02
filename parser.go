@@ -28,10 +28,21 @@ type parser struct {
 	keys     int
 	nodes    int
 	warnings []string
+	// data holds the original source bytes when set; used to populate
+	// rawBytes on container nodes so RawValue can return the verbatim
+	// source slice (including comments and trailing commas).
+	data []byte
 }
 
 func newParser(tokens []token, opts *decoderOptions) *parser {
 	return &parser{tokens: tokens, opts: opts}
+}
+
+// withData attaches the original source bytes; container nodes parsed
+// after this is set will record their byte ranges in rawBytes.
+func (p *parser) withData(data []byte) *parser {
+	p.data = data
+	return p
 }
 
 // parse parses the entire token stream into a single root *node, rejecting
@@ -133,8 +144,12 @@ func (p *parser) parseObject() (*node, error) {
 			if pendingHead != "" {
 				obj.footComment = appendCommentBlock(obj.footComment, pendingHead)
 			}
+			closeOffset := tk.pos.Offset + 1
 			p.bump() // consume '}'
 			obj.comment = p.collectTrailingInlineComment()
+			if p.data != nil && openTk.pos.Offset >= 0 && closeOffset <= len(p.data) {
+				obj.rawBytes = p.data[openTk.pos.Offset:closeOffset]
+			}
 			return obj, nil
 		}
 
@@ -278,8 +293,12 @@ func (p *parser) parseArray() (*node, error) {
 			if pendingHead != "" {
 				arr.footComment = appendCommentBlock(arr.footComment, pendingHead)
 			}
+			closeOffset := tk.pos.Offset + 1
 			p.bump()
 			arr.comment = p.collectTrailingInlineComment()
+			if p.data != nil && openTk.pos.Offset >= 0 && closeOffset <= len(p.data) {
+				arr.rawBytes = p.data[openTk.pos.Offset:closeOffset]
+			}
 			return arr, nil
 		}
 

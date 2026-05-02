@@ -264,7 +264,7 @@ func parseDocument(data []byte, opts *decoderOptions) (*node, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := newParser(tokens, opts)
+	p := newParser(tokens, opts).withData(data)
 	root, err := p.parse()
 	if err != nil {
 		return nil, err
@@ -290,7 +290,7 @@ func parseSingleValue(data []byte, opts *decoderOptions) (*node, int, error) {
 	// Run a streaming-friendly parse: skip leading trivia, parse one value,
 	// then return the byte offset of the token immediately following the
 	// value.
-	p := newParser(tokens, opts)
+	p := newParser(tokens, opts).withData(data)
 	p.consumeIfKind(tokenStreamStart)
 	leadHead := p.collectHeadComments()
 	tk := p.peek()

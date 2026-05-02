@@ -1,0 +1,23 @@
+// Leading file comment.
+/* Block comment before root. */
+{ // After opening brace.
+  // Before key.
+  "a": 1, // Inline after value.
+  /* Between members. */
+  "b": "two", /* Inline block. */
+  "c": [
+    // Inside array, before element.
+    1,
+    2, // Inline element comment.
+    /* Between elements. */
+    3,
+    // Trailing comment in array.
+  ],
+  "d": {
+    // Inside object.
+    "nested": true,
+    // Trailing comment in object.
+  },
+  // Trailing comment in root.
+} // After closing brace.
+// Trailing file comment.

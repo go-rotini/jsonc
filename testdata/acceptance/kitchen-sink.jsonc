@@ -1,0 +1,48 @@
+// Kitchen-sink fixture: every JSONC feature this package supports.
+{
+  // Strings: escapes, unicode, quoted edge cases.
+  "string": "plain",
+  "escaped": "tab\there\nnewline\"quoted\\backslash",
+  "unicode": "café é €",
+
+  /* Block comment.
+     With multiple lines.
+     And * inside. */
+  "numbers": {
+    "integer": 42,
+    "negative": -17,
+    "float": 3.14159,
+    "exponent": 1.5e10,
+    "negative_exponent": -2e-7,
+    "zero": 0,
+  },
+
+  "booleans": [true, false],
+  "null": null,
+
+  // Arrays: mixed types, trailing comma.
+  "mixed": [
+    1,
+    "two",
+    3.0,
+    null,
+    true,
+    {"nested": "object"},
+    [1, 2, 3],
+  ],
+
+  // Empty containers.
+  "empty_array": [],
+  "empty_object": {},
+
+  // Deep nesting.
+  "deep": {
+    "level1": {
+      "level2": {
+        "level3": {
+          "level4": [1, 2, 3]
+        }
+      }
+    }
+  },
+}

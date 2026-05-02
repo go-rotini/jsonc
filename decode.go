@@ -785,7 +785,9 @@ func valueChildren(n *node) []*node {
 
 // nodeRawBytes returns the raw JSONC source bytes for a node. For scalar
 // nodes this is the rawValue (preserving quoting and source form). For
-// containers we re-emit via the AST encoder.
+// containers we return the captured source slice when available
+// (preserving comments and trailing commas verbatim); otherwise we
+// fall back to re-emitting via the AST encoder.
 func nodeRawBytes(n *node) []byte {
 	switch n.kind {
 	case nodeString, nodeNumber, nodeBool, nodeNull:
@@ -794,6 +796,12 @@ func nodeRawBytes(n *node) []byte {
 		}
 		return []byte(n.value)
 	default:
+		if n.rawBytes != nil {
+			// Return a copy so callers cannot mutate the parsed input.
+			out := make([]byte, len(n.rawBytes))
+			copy(out, n.rawBytes)
+			return out
+		}
 		// Re-emit container as compact JSONC. The AST encoder is total over
 		// well-formed nodes — encodeNode only ever returns nil error for
 		// container kinds — so we don't propagate the error here.

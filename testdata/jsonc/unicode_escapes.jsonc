@@ -1,0 +1,7 @@
+{
+  "ascii_escape": "A",
+  "bmp": "é",
+  "snowman": "☃",
+  "surrogate_pair": "😀",
+  "mixed": "Hello é ☃ 😀 world"
+}

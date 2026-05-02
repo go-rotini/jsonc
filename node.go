@@ -56,6 +56,14 @@ type node struct {
 	comment     string
 	headComment string
 	footComment string
+	// rawBytes captures the verbatim source slice spanning a container
+	// node's opening through closing delimiter, inclusive. It is set only
+	// for ObjectNode and ArrayNode by the parser; scalar nodes use rawValue
+	// instead. When present, it lets RawValue / nodeRawBytes return the
+	// original source (including comments and trailing commas) rather than
+	// a re-emitted form. The slice aliases the input bytes passed to
+	// Unmarshal — it remains valid only while the caller retains that input.
+	rawBytes []byte
 }
 
 // NodeKind identifies the type of a JSONC [Node] in the AST.
@@ -249,7 +257,7 @@ func Parse(data []byte, opts ...DecodeOption) (*File, error) {
 		return nil, err
 	}
 
-	p := newParser(tokens, o)
+	p := newParser(tokens, o).withData(data)
 	root, err := p.parse()
 	if err != nil {
 		return nil, err

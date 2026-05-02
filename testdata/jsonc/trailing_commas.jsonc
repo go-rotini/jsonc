@@ -1,0 +1,11 @@
+{
+  "array": [1, 2, 3,],
+  "object_member_trail": {
+    "a": 1,
+    "b": 2,
+  },
+  "nested_trails": {
+    "list": ["x", "y",],
+    "map": {"k": "v",},
+  },
+}
