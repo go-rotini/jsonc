@@ -508,19 +508,8 @@ func isDigit(c byte) bool {
 
 // Valid reports whether data is a valid JSONC document. It accepts JSONC
 // extensions (comments, trailing commas) by default. To validate strict
-// RFC 8259 JSON, parse with [WithStrictJSON] and check the error.
+// RFC 8259 JSON, use [Parse] with [WithStrictJSON] and check the error.
 func Valid(data []byte) bool {
-	sc, err := newScanner(data)
-	if err != nil {
-		return false
-	}
-	tokens, err := sc.scan()
-	if err != nil {
-		return false
-	}
-	// A full validity check requires the parser; for now, scanner success is
-	// a necessary-but-not-sufficient condition. The parser will be wired in
-	// after Phase 3.
-	_ = tokens
-	return true
+	_, err := Parse(data)
+	return err == nil
 }

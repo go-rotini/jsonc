@@ -237,6 +237,7 @@ linters:
           - funlen
           - maintidx
           - nestif
+          - dupl   # writeObjectMultiline / writeArrayMultiline are intentionally parallel
 
       - path: format\.go
         linters:
