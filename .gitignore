@@ -36,7 +36,6 @@ go.work.sum
 
 # Cloned conformance test suites
 testdata/JSONTestSuite/
-testdata/hujson-testdata/
 
 # Mutation testing output
 test_mutation.json
