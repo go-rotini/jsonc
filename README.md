@@ -34,7 +34,7 @@ This package is used as the default JSONC support package for [rotini](https://g
 go get github.com/go-rotini/jsonc
 ```
 
-Requires Go 1.23 or later.
+Requires Go 1.26 or later.
 
 ## Quick Start
 
