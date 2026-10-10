@@ -133,6 +133,7 @@ linters:
         - "strconv"
         - "encoding/base64"
         - "encoding/json"
+        - "encoding/json/v2"
 
     perfsprint:
       strconcat: false
