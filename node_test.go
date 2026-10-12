@@ -1,7 +1,9 @@
 package jsonc
 
 import (
+	"bytes"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -628,5 +630,122 @@ func TestParseWarnings(t *testing.T) {
 	}
 	if clean.Warnings != nil {
 		t.Errorf("Warnings = %q, want nil", clean.Warnings)
+	}
+}
+
+// treeShape returns a copy of n without positions, for comparing trees
+// parsed from different text. With noComments, comments are cleared too.
+func treeShape(n *Node, noComments bool) *Node {
+	out := cloneNode(n)
+	Walk(out, func(c *Node) bool {
+		c.Pos = Position{}
+		if noComments {
+			c.Comment, c.HeadComment, c.FootComment, c.TrailComment = "", "", "", ""
+		}
+		return true
+	})
+	return out
+}
+
+func TestRootTrailCommentRoundTrip(t *testing.T) {
+	cases := []struct {
+		name      string
+		src       string
+		foot      string // root FootComment
+		trail     string // root TrailComment
+		lastClose string // the root's last token in the output
+	}{
+		{
+			name:      "object",
+			src:       "// before\n{\n  // head a\n  \"a\": 1, // line a\n  \"b\": [\n    2\n    // foot b\n  ]\n  // foot obj\n}\n// after 1\n// after 2\n",
+			foot:      " foot obj",
+			trail:     " after 1\n after 2",
+			lastClose: "}",
+		},
+		{
+			name:      "array",
+			src:       "// before\n[\n  // head 1\n  1,\n  {\"x\": true} // line x\n  // foot arr\n] // line arr\n// after\n",
+			foot:      " foot arr",
+			trail:     " after",
+			lastClose: "]",
+		},
+		{
+			name:      "empty object",
+			src:       "{\n  // only\n}\n// after\n",
+			foot:      " only",
+			trail:     " after",
+			lastClose: "}",
+		},
+		{
+			name:      "scalar",
+			src:       "// before\n42 // line\n// after\n",
+			trail:     " after",
+			lastClose: "42",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := mustParse(t, tc.src)
+			if f.Root.FootComment != tc.foot {
+				t.Errorf("FootComment = %q, want %q", f.Root.FootComment, tc.foot)
+			}
+			if f.Root.TrailComment != tc.trail {
+				t.Errorf("TrailComment = %q, want %q", f.Root.TrailComment, tc.trail)
+			}
+
+			out, err := NodeToBytesWithOptions(f.Root, WithIndent("  "))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.trail != "" && strings.LastIndex(string(out), "// after") < strings.LastIndex(string(out), tc.lastClose) {
+				t.Errorf("trail comment written before the root's end:\n%s", out)
+			}
+			again := mustParse(t, string(out))
+			if got, want := treeShape(again.Root, false), treeShape(f.Root, false); !reflect.DeepEqual(got, want) {
+				t.Errorf("tree changed through NodeToBytesWithOptions:\n%s", out)
+			}
+
+			compact, err := NodeToBytes(f.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := treeShape(mustParse(t, string(compact)).Root, true), treeShape(f.Root, true); !reflect.DeepEqual(got, want) {
+				t.Errorf("tree changed through NodeToBytes: %s", compact)
+			}
+
+			formatted, err := Format([]byte(tc.src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(formatted, out) {
+				t.Errorf("Format and NodeToBytesWithOptions differ:\n%s\n---\n%s", formatted, out)
+			}
+			twice, err := Format(formatted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(twice, formatted) {
+				t.Errorf("Format not stable:\n%s\n---\n%s", formatted, twice)
+			}
+		})
+	}
+}
+
+func TestBuiltTrailComment(t *testing.T) {
+	root := &Node{Kind: ObjectNode, TrailComment: "after root", Children: []*Node{
+		{Kind: KeyValueNode, Key: "a", Children: []*Node{
+			{Kind: ArrayNode, FootComment: "in a", TrailComment: "after a"},
+		}},
+		{Kind: KeyValueNode, Key: "b", TrailComment: "after b", Children: []*Node{
+			{Kind: NumberNode, Value: "1"},
+		}},
+	}}
+	out, err := NodeToBytesWithOptions(root, WithIndent("  "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\n  \"a\": [\n    // in a\n  ],\n  // after a\n  \"b\": 1\n  // after b\n}\n// after root\n"
+	if string(out) != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out, want)
 	}
 }

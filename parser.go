@@ -18,7 +18,8 @@ import (
 //   - FootComment: for a container, comments before its closing delimiter
 //     on lines after the last child; for a member or element, comments on
 //     the lines between it and its comma.
-//   - trailComment: comments after the root value, on later lines.
+//   - trailComment: comments after the root value, on later lines (set
+//     only on the root).
 //   - Comments between a key and its value are dropped, with a warning.
 //     The parser never produces CommentNode children.
 type parser struct {
@@ -489,7 +490,7 @@ func (p *parser) warnf(pos Position, format string, args ...any) {
 }
 
 // consumeTrailing handles tokens after the root value. Whitespace, newlines,
-// and comments are accepted. Comments are appended to the root's foot
+// and comments are accepted. Comments are appended to the root's trail
 // comment. Any other token triggers an "extra data after value" error.
 func (p *parser) consumeTrailing(root *node) error {
 	for {

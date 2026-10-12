@@ -46,7 +46,7 @@
 //	}
 //
 // The parser attaches comments to nearby AST nodes ([Node.HeadComment],
-// [Node.Comment], [Node.FootComment]). Comments are written back only in
+// [Node.Comment], [Node.FootComment], [Node.TrailComment]). Comments are written back only in
 // multi-line output: [Format] keeps them in place, as // comments unless a
 // comment spans lines, while [Minimize] and other compact output drop them.
 // A comment between a key and its value has no place in the AST and is

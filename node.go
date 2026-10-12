@@ -43,7 +43,8 @@ const (
 //   - children: for nodeObject (members), nodeArray (elements), or
 //     nodeKeyValue (single value).
 //   - pos: position of the node's first token.
-//   - comment / headComment / footComment: comment-association annotations.
+//   - comment / headComment / footComment / trailComment: comment-association
+//     annotations.
 type node struct {
 	kind        nodeKind
 	key         string
@@ -55,8 +56,8 @@ type node struct {
 	comment     string
 	headComment string
 	footComment string
-	// trailComment holds comments after the document's root value, on
-	// the lines below it. It is set only on the root by the parser.
+	// trailComment holds comments on the lines after the node, past its
+	// closing delimiter and comma. The parser sets it only on the root.
 	trailComment string
 	// rawBytes captures the verbatim source slice spanning a container
 	// node's opening through closing delimiter, inclusive. It is set only
@@ -129,6 +130,7 @@ type Node struct {
 	Comment      string       // comment on the same line, after the value or its comma
 	HeadComment  string       // comments on the lines before this node
 	FootComment  string       // comments after this node: for a container, before its closing delimiter; for a member or element, before the following comma
+	TrailComment string       // comments on the lines after this node, past its closing delimiter and comma; the parser sets it only on the root
 }
 
 // String returns a concise human-readable representation. For scalars, the
@@ -199,9 +201,7 @@ func (n *Node) Validate() error {
 type File struct {
 	// Root is the top-level value parsed from the input. Comments before it
 	// are attached to its HeadComment, a comment on its last line to its
-	// Comment, and comments on the lines after it to its FootComment. For
-	// an object or array root, [NodeToBytesWithOptions] writes FootComment
-	// before the closing delimiter; [Format] keeps such comments after it.
+	// Comment, and comments on the lines after it to its TrailComment.
 	Root *Node
 	// Warnings lists non-fatal parse messages, each prefixed with its line
 	// and column: a duplicate key replaced under [WithAllowDuplicateKeys],
@@ -313,7 +313,8 @@ func exportNode(n *node) *Node {
 		Pos:          n.pos,
 		Comment:      n.comment,
 		HeadComment:  n.headComment,
-		FootComment:  appendCommentBlock(n.footComment, n.trailComment),
+		FootComment:  n.footComment,
+		TrailComment: n.trailComment,
 	}
 	for _, child := range n.children {
 		out.Children = append(out.Children, exportNode(child))
@@ -328,15 +329,16 @@ func importNode(n *Node) *node {
 		return nil
 	}
 	out := &node{
-		kind:        importKind(n.Kind),
-		key:         n.Key,
-		value:       n.Value,
-		rawValue:    n.RawValue,
-		style:       importStyle(n.CommentStyle),
-		pos:         n.Pos,
-		comment:     n.Comment,
-		headComment: n.HeadComment,
-		footComment: n.FootComment,
+		kind:         importKind(n.Kind),
+		key:          n.Key,
+		value:        n.Value,
+		rawValue:     n.RawValue,
+		style:        importStyle(n.CommentStyle),
+		pos:          n.Pos,
+		comment:      n.Comment,
+		headComment:  n.HeadComment,
+		footComment:  n.FootComment,
+		trailComment: n.TrailComment,
 	}
 	for _, child := range n.Children {
 		out.children = append(out.children, importNode(child))

@@ -76,16 +76,27 @@ func (e *encoder) encodeNode(n *node) ([]byte, error) {
 	e.writeValue(n, 0)
 	if e.nodeComments() {
 		e.writeLineComments(n)
-		foot := n.trailComment
-		if !isContainer(n) {
-			foot = appendCommentBlock(n.footComment, foot)
-		}
-		if foot != "" {
+		if after := afterComments(n); after != "" {
 			e.buf.WriteByte('\n')
-			e.writeCommentBlock(foot, 0)
+			e.writeCommentBlock(after, 0)
 		}
 	}
 	return e.buf.Bytes(), nil
+}
+
+// afterComments returns the comments written on the lines after n: its
+// foot comment unless n is a container (which writes it before its
+// closing delimiter), then its trail comment. A member also carries its
+// value's trail comment.
+func afterComments(n *node) string {
+	var after string
+	if !isContainer(n) {
+		after = n.footComment
+	}
+	if n.kind == nodeKeyValue && len(n.children) > 0 {
+		after = appendCommentBlock(after, n.children[0].trailComment)
+	}
+	return appendCommentBlock(after, n.trailComment)
 }
 
 // nodeComments reports whether AST comment annotations are written: only
@@ -137,8 +148,8 @@ func (e *encoder) writeLineComments(n *node) {
 
 // writeChildren emits the members or elements of a multi-line container,
 // each on its own line at depth, with its comments around it: head
-// comments above, line comments after the comma, and a member's or
-// scalar's foot comment on the lines below.
+// comments above, line comments after the comma, and [afterComments] on
+// the lines below.
 func (e *encoder) writeChildren(n *node, depth int) {
 	// Count value-bearing children up front so trailing-comma logic can
 	// distinguish "last member" from "last child" (CommentNode siblings
@@ -169,8 +180,10 @@ func (e *encoder) writeChildren(n *node, depth int) {
 			e.writeLineComments(child)
 		}
 		e.buf.WriteByte('\n')
-		if e.nodeComments() && child.footComment != "" && !isContainer(child) {
-			e.writeCommentBlock(child.footComment, depth)
+		if e.nodeComments() {
+			if after := afterComments(child); after != "" {
+				e.writeCommentBlock(after, depth)
+			}
 		}
 	}
 }
