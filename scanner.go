@@ -495,9 +495,10 @@ func isDigit(c byte) bool {
 	return c >= '0' && c <= '9'
 }
 
-// Valid reports whether data is a valid JSONC document. It accepts JSONC
-// extensions (comments, trailing commas) by default. To validate strict
-// RFC 8259 JSON, use [Parse] with [WithStrictJSON] and check the error.
+// Valid reports whether data is a valid JSONC document, as [Parse] with
+// default options would accept it: comments and trailing commas are allowed,
+// duplicate keys and nesting deeper than 100 levels are not. To validate
+// strict RFC 8259 JSON, call [Parse] with [WithStrictJSON].
 func Valid(data []byte) bool {
 	_, err := Parse(data)
 	return err == nil

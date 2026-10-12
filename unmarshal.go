@@ -9,21 +9,20 @@ import (
 	"os"
 )
 
-// RawValue is raw JSONC that has not been decoded. It can be used to
-// delay decoding or to pass through a JSONC value without interpreting
-// it. Analogous to [encoding/json.RawMessage].
-//
-// RawValue includes any comments and whitespace that are syntactically
-// inside the value's bounds. To strip comments and trailing commas,
-// producing standard JSON, use [RawValue.Standardize].
+// RawValue is raw JSONC that has not been decoded, like
+// [encoding/json.RawMessage]. Use it to delay decoding or to pass a value
+// through unchanged. When decoded from an object or array, it holds the
+// source text verbatim, including comments and trailing commas inside the
+// value; [RawValue.Standardize] converts it to standard JSON.
 type RawValue []byte
 
-// Unmarshal decodes the raw JSONC value into v.
+// Unmarshal decodes r into v, as [UnmarshalWithOptions] does.
 func (r RawValue) Unmarshal(v any, opts ...DecodeOption) error {
 	return UnmarshalWithOptions(r, v, opts...)
 }
 
-// MarshalJSONC returns the raw bytes verbatim. Implements [Marshaler].
+// MarshalJSONC implements [Marshaler]. It returns r verbatim, or "null" if r
+// is empty.
 func (r RawValue) MarshalJSONC() ([]byte, error) {
 	if len(r) == 0 {
 		return []byte("null"), nil
@@ -31,7 +30,7 @@ func (r RawValue) MarshalJSONC() ([]byte, error) {
 	return r, nil
 }
 
-// UnmarshalJSONC stores the raw bytes verbatim. Implements [BytesUnmarshaler].
+// UnmarshalJSONC implements [BytesUnmarshaler] by storing a copy of data.
 func (r *RawValue) UnmarshalJSONC(data []byte) error {
 	*r = append((*r)[:0], data...)
 	return nil
@@ -47,9 +46,10 @@ func (r RawValue) Standardize() ([]byte, error) {
 // block comments and trailing commas (per JWCC). For RFC 8259-strict
 // behavior, use [UnmarshalWithOptions] with [WithStrictJSON].
 //
-// v must be a non-nil pointer to a Go value. The Go target may be any
-// type supported by the decoder; see the package documentation for the
-// type-mapping table.
+// v must be a non-nil pointer; otherwise Unmarshal returns [ErrNilPointer].
+// See the package documentation for the type mapping. Values that cannot be
+// assigned to their targets are collected and reported together in a
+// [TypeError] after decoding the rest of the input.
 func Unmarshal(data []byte, v any) error {
 	return UnmarshalWithOptions(data, v)
 }
@@ -89,9 +89,10 @@ func DecodeFile(path string, v any, opts ...DecodeOption) error {
 	return UnmarshalWithOptions(data, v, opts...)
 }
 
-// Decoder reads JSONC values from an input stream. It supports decoding
-// multiple top-level values back-to-back from a single reader, matching
-// [encoding/json.Decoder] semantics.
+// Decoder reads a sequence of top-level JSONC values from an input, like
+// [encoding/json.Decoder]. Unlike that type, it reads the whole input into
+// memory on the first call to [Decoder.Decode] or [Decoder.More], so it is
+// not suited to unbounded streams.
 type Decoder struct {
 	r        io.Reader
 	opts     *decoderOptions
@@ -114,13 +115,14 @@ func NewDecoder(r io.Reader, opts ...DecodeOption) *Decoder {
 	}
 }
 
-// Decode reads the next JSONC value from the underlying reader and decodes
-// it into v.
+// Decode decodes the next JSONC value into v. It returns [io.EOF] when no
+// values remain.
 func (dec *Decoder) Decode(v any) error {
 	return dec.DecodeContext(dec.ctx, v)
 }
 
-// DecodeContext reads the next JSONC value with the given context.
+// DecodeContext is like [Decoder.Decode] but passes ctx to any
+// [UnmarshalerContext] it calls.
 func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 	if err := dec.ensureLoaded(); err != nil {
 		return err
@@ -154,8 +156,10 @@ func (dec *Decoder) More() bool {
 	return startOffset >= 0
 }
 
-// InputOffset returns the byte offset (in the input stream) of the next
-// value's first byte (after consumed bytes and whitespace/comments).
+// InputOffset returns the input byte offset where the next [Decoder.Decode]
+// starts scanning: just after the most recently decoded value, past any
+// spaces or tabs that follow it. It is 0 before the
+// first value is decoded.
 func (dec *Decoder) InputOffset() int64 {
 	return dec.consumed
 }

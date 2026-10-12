@@ -8,11 +8,12 @@ import (
 )
 
 // Path is a compiled query that selects zero or more [Node] values from a
-// JSONC AST. Paths can be built from a rotini-style expression (see
-// [PathString]) or from an RFC 6901 JSON Pointer (see [PathPointer]).
+// JSONC AST. Build one from a JSONPath-like expression with [PathString] or
+// from an RFC 6901 JSON Pointer with [PathPointer]. A Path is immutable and
+// can be reused across documents.
 //
-// A Path is immutable after construction; reuse compiled paths across
-// queries against different documents.
+// A member segment selects the member's value node, not its
+// [KeyValueNode].
 type Path struct {
 	expr     string // original expression, for error messages
 	segments []pathSegment
@@ -38,20 +39,21 @@ const (
 // String returns the original expression used to build the path.
 func (p Path) String() string { return p.expr }
 
-// PathString compiles a rotini-style path expression into a [Path]. The
-// supported grammar is intentionally small:
+// PathString compiles a path expression into a [Path]. The grammar is a
+// small JSONPath-like subset:
 //
-//	$           — the root document (optional; default if expression starts with . or [)
-//	.name       — exact object member by name (name follows JS-identifier rules)
-//	["name"]    — exact object member, allowing arbitrary names
-//	['name']    — same as above with single quotes
+//	$           — the root (optional; an expression may start with . or [)
+//	.name       — object member; name runs to the next . or [
+//	["name"]    — object member; name may contain . and [ but not ], and
+//	              has no escape sequences
+//	['name']    — same, with single quotes
 //	[N]         — 0-based array index (negative indices are not supported)
-//	[*]         — wildcard: every direct child of the current container
-//	..name      — recursive descent: every descendant whose key matches name
+//	[*]         — every member value or element of the current container
+//	..name      — every descendant member named name, at any depth
 //
-// Whitespace inside brackets is allowed; outside brackets it is not.
+// Whitespace inside brackets is trimmed; elsewhere it is part of the name.
 //
-// Returns [ErrPathSyntax] (wrapped) for malformed expressions.
+// Malformed expressions return an error wrapping [ErrPathSyntax].
 func PathString(expr string) (Path, error) {
 	p := Path{expr: expr}
 	src := expr
@@ -135,14 +137,14 @@ func parseBracketSegment(s string) (pathSegment, string, error) {
 	return pathSegment{kind: segIndex, index: idx}, rest, nil
 }
 
-// PathPointer compiles an RFC 6901 JSON Pointer into a [Path]. Per the
-// RFC, the empty string refers to the document root; non-empty pointers
-// must start with `/`. Tokens use the standard escapes `~0` for `~` and
-// `~1` for `/`. Numeric tokens applied to an array select an element by
-// index; the special token `-` (one-past-end) is rejected by [Path.Read]
-// but accepted by [Path.Append] for the JSON Patch `add` operation.
+// PathPointer compiles an RFC 6901 JSON Pointer into a [Path]. The empty
+// string refers to the root; other pointers must start with "/". Tokens use
+// the escapes ~0 for ~ and ~1 for /. A numeric token applied to an array
+// selects an element by index. The "-" token (one past the end of an array)
+// matches nothing; it is meaningful only in a [Patch] add operation.
 //
-// Returns [ErrPointerSyntax] (wrapped) for malformed pointers.
+// A pointer that does not start with "/" returns an error wrapping
+// [ErrPointerSyntax].
 func PathPointer(ptr string) (Path, error) {
 	p := Path{expr: ptr}
 	if ptr == "" {
@@ -175,8 +177,7 @@ func decodePointerToken(tok string) string {
 	return tok
 }
 
-// Read returns the [Node] values reachable by p starting from root, in
-// document order. Returns nil when no nodes match.
+// Read returns the nodes matched by p under root, or nil when none match.
 func (p Path) Read(root *Node) []*Node {
 	if root == nil {
 		return nil
@@ -200,9 +201,9 @@ func (p Path) ReadFirst(root *Node) (*Node, error) {
 	return matches[0], nil
 }
 
-// ReadString is a convenience for paths that select a string-valued node.
-// Returns the unescaped string value of the first match, or
-// [ErrPathNotFound]. Non-string scalars return their raw textual form.
+// ReadString returns the value of the first node matched by p, or
+// [ErrPathNotFound]. A string yields its unescaped value, another scalar its
+// source text, and a container the summary from [Node.String].
 func (p Path) ReadString(root *Node) (string, error) {
 	n, err := p.ReadFirst(root)
 	if err != nil {
@@ -226,11 +227,8 @@ func (p Path) ReadPositions(root *Node) []Position {
 	return out
 }
 
-// Replace overwrites every node matched by p with a copy of value. When the
-// match is a [KeyValueNode] (an object member), the value child is replaced;
-// otherwise the matched node itself is overwritten in place.
-//
-// Returns [ErrPathNotFound] if p matches no nodes.
+// Replace overwrites every node matched by p, in place, with a deep copy of
+// value. It returns [ErrPathNotFound] if p matches no nodes.
 func (p Path) Replace(root, value *Node) error {
 	matches := p.Read(root)
 	if len(matches) == 0 {
@@ -251,12 +249,13 @@ func (p Path) Replace(root, value *Node) error {
 	return nil
 }
 
-// Append appends value as a new child to every container matched by p.
-// For an object, value must be a [KeyValueNode]. For an array, value is
-// appended as an element.
+// Append appends a deep copy of value to every container matched by p. For
+// an object, value must be a [KeyValueNode]; for an array, it is appended
+// as an element. Append does not check for duplicate keys.
 //
-// Returns [ErrPathNotFound] if p matches no nodes, or a [SyntaxError] if
-// the value kind doesn't fit the matched container kind.
+// It returns [ErrPathNotFound] if p matches no nodes, or a [SyntaxError] if
+// a match is not a container or value does not fit it. Matches before the
+// failing one have already been modified.
 func (p Path) Append(root, value *Node) error {
 	matches := p.Read(root)
 	if len(matches) == 0 {
@@ -278,11 +277,9 @@ func (p Path) Append(root, value *Node) error {
 	return nil
 }
 
-// Delete removes every node matched by p from its parent container.
-// KeyValueNode matches are removed from their parent ObjectNode; element
-// matches are removed from their parent ArrayNode.
-//
-// Returns [ErrPathNotFound] if p matches no nodes.
+// Delete removes every node matched by p from its parent container: an
+// object member together with its key, or an array element. It returns
+// [ErrPathNotFound] if p matches no nodes.
 func (p Path) Delete(root *Node) error {
 	matches := p.Read(root)
 	if len(matches) == 0 {

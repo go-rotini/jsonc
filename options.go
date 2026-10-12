@@ -2,8 +2,8 @@ package jsonc
 
 import "reflect"
 
-// EncodeOption configures the behavior of [Marshal], [MarshalWithOptions],
-// and [Encoder].
+// EncodeOption configures [MarshalWithOptions], [MarshalTo], [EncodeFile],
+// [NewEncoder], [Format], [Minimize] and [NodeToBytesWithOptions].
 type EncodeOption func(*encoderOptions)
 
 // Comment attaches a comment to a JSONC node identified by key path when
@@ -46,15 +46,14 @@ func defaultEncodeOptions() *encoderOptions {
 	return &encoderOptions{}
 }
 
-// WithIndent sets the per-level indentation string. An empty string (default)
-// produces compact output. Common choices are "  " (two spaces), "    "
-// (four spaces), or "\t" (tab).
+// WithIndent sets the per-level indentation string, such as two spaces or a
+// tab. An empty string (the default) produces compact output.
 func WithIndent(indent string) EncodeOption {
 	return func(o *encoderOptions) { o.indent = indent }
 }
 
-// WithIndentN is a convenience that sets the indentation to n spaces.
-// Equivalent to WithIndent(strings.Repeat(" ", n)).
+// WithIndentN sets the indentation to n spaces. Zero or a negative n
+// produces compact output.
 func WithIndentN(n int) EncodeOption {
 	return func(o *encoderOptions) {
 		if n <= 0 {
@@ -69,24 +68,21 @@ func WithIndentN(n int) EncodeOption {
 	}
 }
 
-// WithEscapeHTML controls whether <, >, &, U+2028, and U+2029 are escaped
-// as their \u00XX equivalents in string output. The default is false (clean
-// output); set to true for parity with [encoding/json], which escapes by
+// WithEscapeHTML controls whether <, > and & in strings are written as
+// \u00XX escapes. The default is false; [encoding/json] escapes them by
 // default.
 func WithEscapeHTML(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.escapeHTML = b }
 }
 
-// WithArrayMultiline emits arrays with one element per line, regardless of
-// the indent setting. Without this option, arrays follow the compact-or-
-// indented rule of the surrounding output.
+// WithArrayMultiline writes arrays with one element per line even when the
+// rest of the output is compact.
 func WithArrayMultiline(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.arrayMultiline = b }
 }
 
-// WithOmitEmpty omits struct fields and map entries whose values are the
-// zero value for their type. Equivalent to adding ",omitempty" to every
-// field tag.
+// WithOmitEmpty omits empty struct fields, as if every field tag had
+// ",omitempty". Map entries are not affected.
 func WithOmitEmpty(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.omitEmpty = b }
 }
@@ -106,15 +102,10 @@ func WithDurationAsString(b bool) EncodeOption {
 }
 
 // WithStrictJSONOutput ensures the encoded output is valid RFC 8259 JSON:
-// no comments are emitted (any comments registered via [WithComment] or
-// attached to AST nodes are silently dropped), and no trailing commas are
-// emitted regardless of [WithTrailingComma]. Inf and NaN are already
-// rejected in default mode; this option is a defense-in-depth guard for
-// pipelines that must produce strict JSON.
-//
-// The encode-side counterpart of the decode-side [WithStrictJSON]; the
-// names differ because Go does not allow same-name option functions
-// returning different types.
+// comments (from [WithComment], "comment" tags or AST nodes) are dropped,
+// trailing commas are not written regardless of [WithTrailingComma], and
+// [RawValue] fields are converted with [ToJSON]. It is the encode-side
+// counterpart of [WithStrictJSON].
 func WithStrictJSONOutput(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.strictJSONOutput = b }
 }
@@ -136,17 +127,20 @@ func WithMapKeyOrder(order MapKeyOrder) EncodeOption {
 //   - Array elements use bracket-with-index: "tags[0]" or "items[3].name".
 //
 // Comments are emitted only when output is multi-line (indent is set) and
-// not in [WithStrictJSONOutput] mode. In compact or strict-JSON-output
-// modes the option is silently ignored.
+// not in [WithStrictJSONOutput] mode; otherwise the option is ignored. It
+// applies to encoding Go values, not to [Format], [Minimize] or
+// [NodeToBytesWithOptions].
 func WithComment(comments map[string][]Comment) EncodeOption {
 	return func(o *encoderOptions) { o.comments = comments }
 }
 
 // WithCustomMarshaler registers a function that encodes values of type T
-// to JSONC bytes, overriding the default encoding for that type. Custom
-// marshalers run at lower priority than the [Marshaler] /
-// [MarshalerContext] / [json.Marshaler] interfaces — to override a type
-// that already implements one of those interfaces, wrap it in a new type.
+// to JSONC bytes, which are written verbatim. It takes precedence over the
+// [Marshaler], [MarshalerContext], [encoding/json.Marshaler] and
+// [encoding.TextMarshaler] interfaces, but not over the built-in handling
+// of [RawValue], [encoding/json.RawMessage], [Number], [MapSlice],
+// time.Time, time.Duration, big.Int and big.Float (and pointers to the big
+// types).
 func WithCustomMarshaler[T any](fn func(T) ([]byte, error)) EncodeOption {
 	return func(o *encoderOptions) {
 		if o.customMarshalers == nil {
@@ -156,8 +150,8 @@ func WithCustomMarshaler[T any](fn func(T) ([]byte, error)) EncodeOption {
 	}
 }
 
-// DecodeOption configures the behavior of [Unmarshal],
-// [UnmarshalWithOptions], [UnmarshalTo], [Decoder], and [Parse].
+// DecodeOption configures [UnmarshalWithOptions], [UnmarshalTo],
+// [DecodeFile], [RawValue.Unmarshal], [NewDecoder] and [Parse].
 type DecodeOption func(*decoderOptions)
 
 // StructValidator validates a struct after all fields have been decoded.
@@ -233,42 +227,43 @@ func WithDefaults() DecodeOption {
 	return func(o *decoderOptions) { o.applyDefaults = true }
 }
 
-// WithMaxDepth limits the nesting depth of the decoded value (default
-// 100). Deeply nested documents are rejected with a [SyntaxError].
+// WithMaxDepth limits the nesting depth of the parsed value (default 100).
+// Deeper documents are rejected with a [SyntaxError]. Zero or a negative n
+// means no limit.
 func WithMaxDepth(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxDepth = n }
 }
 
 // WithMaxKeys limits the total number of object keys the parser may
-// encounter. Zero means no limit.
+// encounter; exceeding it is a [SyntaxError]. Zero means no limit.
 func WithMaxKeys(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxKeys = n }
 }
 
-// WithMaxDocumentSize rejects input that exceeds n bytes before parsing
-// begins. Zero means no limit.
+// WithMaxDocumentSize rejects input longer than n bytes with
+// [ErrDocumentSize] before parsing begins. Zero means no limit.
 func WithMaxDocumentSize(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxDocumentSize = n }
 }
 
 // WithMaxNodes limits the total number of AST nodes the parser may
-// create. Zero means no limit.
+// create; exceeding it is a [SyntaxError]. Zero means no limit.
 func WithMaxNodes(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxNodes = n }
 }
 
 // WithValidator registers a [StructValidator] that is called after each
-// struct is fully decoded.
+// struct is decoded from a JSONC object. A validator error is returned
+// wrapped in a [ValidationError].
 func WithValidator(v StructValidator) DecodeOption {
 	return func(o *decoderOptions) { o.validator = v }
 }
 
-// WithCustomUnmarshaler registers a function that decodes JSONC bytes
-// into a value of type T, overriding the default decoding for that type.
-// Custom unmarshalers run at lower priority than the [Unmarshaler] /
-// [BytesUnmarshaler] / [UnmarshalerContext] / [json.Unmarshaler]
-// interfaces — to override a type that already implements one of those,
-// wrap it in a new type.
+// WithCustomUnmarshaler registers a function that decodes the raw JSONC
+// bytes of a value into a T. It takes precedence over the [Unmarshaler],
+// [UnmarshalerContext], [BytesUnmarshaler], [encoding/json.Unmarshaler] and
+// [encoding.TextUnmarshaler] interfaces, but not over the built-in handling
+// of [RawValue], [encoding/json.RawMessage], [Number] and time.Time.
 func WithCustomUnmarshaler[T any](fn func(*T, []byte) error) DecodeOption {
 	return func(o *decoderOptions) {
 		if o.customUnmarshalers == nil {

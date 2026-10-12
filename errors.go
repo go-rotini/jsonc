@@ -22,8 +22,10 @@ func (p Position) String() string {
 	return fmt.Sprintf("%d:%d", p.Line, p.Column)
 }
 
-// SyntaxError is returned when the JSONC input is malformed.
-// Use [errors.Is](err, [ErrSyntax]) to test for syntax errors generically.
+// SyntaxError is returned when the JSONC input is malformed. It also
+// reports exceeded parse limits ([WithMaxDepth], [WithMaxKeys],
+// [WithMaxNodes]), a missing required key, and a map key that cannot be
+// converted to the map's key type.
 type SyntaxError struct {
 	// Message is a short human-readable description of the syntactic problem.
 	Message string
@@ -34,6 +36,7 @@ type SyntaxError struct {
 	Token string
 }
 
+// Error implements the error interface.
 func (e *SyntaxError) Error() string {
 	if e.Pos.Line > 0 {
 		return fmt.Sprintf("jsonc: line %d, column %d: %s", e.Pos.Line, e.Pos.Column, e.Message)
@@ -41,6 +44,8 @@ func (e *SyntaxError) Error() string {
 	return fmt.Sprintf("jsonc: %s", e.Message)
 }
 
+// Is reports whether target is a *SyntaxError, so that
+// errors.Is(err, [ErrSyntax]) matches any syntax error.
 func (e *SyntaxError) Is(target error) bool {
 	_, ok := target.(*SyntaxError)
 	return ok
@@ -55,10 +60,13 @@ type TypeError struct {
 	Errors []string
 }
 
+// Error implements the error interface.
 func (e *TypeError) Error() string {
 	return fmt.Sprintf("jsonc: unmarshal errors:\n  %s", strings.Join(e.Errors, "\n  "))
 }
 
+// Is reports whether target is a *TypeError, so that
+// errors.Is(err, [ErrType]) matches any type error.
 func (e *TypeError) Is(target error) bool {
 	_, ok := target.(*TypeError)
 	return ok
@@ -73,10 +81,13 @@ type UnknownFieldError struct {
 	Pos Position
 }
 
+// Error implements the error interface.
 func (e *UnknownFieldError) Error() string {
 	return fmt.Sprintf("jsonc: line %d: unknown field %q", e.Pos.Line, e.Field)
 }
 
+// Is reports whether target is an *UnknownFieldError, so that
+// errors.Is(err, [ErrUnknownField]) matches any unknown-field error.
 func (e *UnknownFieldError) Is(target error) bool {
 	_, ok := target.(*UnknownFieldError)
 	return ok
@@ -92,10 +103,13 @@ type DuplicateKeyError struct {
 	Pos Position
 }
 
+// Error implements the error interface.
 func (e *DuplicateKeyError) Error() string {
 	return fmt.Sprintf("jsonc: line %d: duplicate key %q", e.Pos.Line, e.Key)
 }
 
+// Is reports whether target is a *DuplicateKeyError, so that
+// errors.Is(err, [ErrDuplicateKey]) matches any duplicate-key error.
 func (e *DuplicateKeyError) Is(target error) bool {
 	_, ok := target.(*DuplicateKeyError)
 	return ok
@@ -112,14 +126,18 @@ type ValidationError struct {
 	Pos Position
 }
 
+// Error implements the error interface.
 func (e *ValidationError) Error() string {
 	return fmt.Sprintf("jsonc: line %d: validation: %s", e.Pos.Line, e.Err.Error())
 }
 
+// Unwrap returns e.Err.
 func (e *ValidationError) Unwrap() error {
 	return e.Err
 }
 
+// Is reports whether target is a *ValidationError, so that
+// errors.Is(err, [ErrValidation]) matches any validation error.
 func (e *ValidationError) Is(target error) bool {
 	_, ok := target.(*ValidationError)
 	return ok
@@ -128,18 +146,22 @@ func (e *ValidationError) Is(target error) bool {
 // DefaultError is returned when a default value from a struct tag cannot be
 // applied (parse failure, overflow, or unsupported field type).
 type DefaultError struct {
-	// Field is the struct field name (or jsonc-tag name, when set).
+	// Field is the field's key name (from its "jsonc" or "json" tag, else
+	// the Go field name).
 	Field string
 	// Message describes why the default could not be applied.
 	Message string
-	// Pos is the source position of the surrounding object, if known.
+	// Pos is not set by the decoder; it is always the zero Position.
 	Pos Position
 }
 
+// Error implements the error interface.
 func (e *DefaultError) Error() string {
 	return fmt.Sprintf("jsonc: field %q: %s", e.Field, e.Message)
 }
 
+// Is reports whether target is a *DefaultError, so that
+// errors.Is(err, [ErrDefault]) matches any default-value error.
 func (e *DefaultError) Is(target error) bool {
 	_, ok := target.(*DefaultError)
 	return ok
@@ -155,10 +177,13 @@ type OverflowError struct {
 	Pos Position
 }
 
+// Error implements the error interface.
 func (e *OverflowError) Error() string {
 	return fmt.Sprintf("jsonc: line %d: value %s overflows %s", e.Pos.Line, e.Value, e.Type)
 }
 
+// Is reports whether target is an *OverflowError, so that
+// errors.Is(err, [ErrOverflow]) matches any overflow error.
 func (e *OverflowError) Is(target error) bool {
 	_, ok := target.(*OverflowError)
 	return ok
@@ -174,10 +199,13 @@ type StrictJSONError struct {
 	Pos Position
 }
 
+// Error implements the error interface.
 func (e *StrictJSONError) Error() string {
 	return fmt.Sprintf("jsonc: line %d: strict JSON mode rejects %s", e.Pos.Line, e.Feature)
 }
 
+// Is reports whether target is a *StrictJSONError, so that
+// errors.Is(err, [ErrStrictJSON]) matches any strict-JSON error.
 func (e *StrictJSONError) Is(target error) bool {
 	_, ok := target.(*StrictJSONError)
 	return ok
@@ -216,15 +244,17 @@ var (
 	// ErrDocumentSize indicates the input exceeds the configured [WithMaxDocumentSize] limit.
 	ErrDocumentSize = errors.New("jsonc: document size exceeds limit")
 	// ErrUnsupportedValue indicates a value cannot be encoded (Inf/NaN, channels,
-	// functions, complex numbers, or cyclic data).
+	// functions, complex numbers, cyclic data, or an unsupported map key type).
 	ErrUnsupportedValue = errors.New("jsonc: unsupported value")
 )
 
-// FormatError returns a human-readable string for errors that carry a
-// [Position] (such as [SyntaxError], [DuplicateKeyError], [OverflowError],
-// [StrictJSONError], or [ValidationError]). The output includes the offending
-// source line and a column pointer. For other error types it returns
-// err.Error(). Set color to true to include ANSI color escape sequences.
+// FormatError formats err for display against the source data. For an
+// error that carries a [Position] ([SyntaxError], [DuplicateKeyError],
+// [OverflowError], [StrictJSONError], [UnknownFieldError] or
+// [ValidationError], possibly wrapped), the output adds the offending source
+// line and a caret under the column. For any other error, or a position
+// outside data, it returns err.Error(). Pass true for color to add ANSI color
+// escape sequences.
 func FormatError(data []byte, err error, color ...bool) string {
 	pos := extractPosition(err)
 	if pos.Line == 0 {

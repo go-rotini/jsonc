@@ -21,21 +21,26 @@ var (
 	errUnsupportedMapKey = errors.New("unsupported map key type")
 )
 
-// Unmarshaler is implemented by types that need structured access to their
-// JSONC data during decoding. The unmarshal function decodes the JSONC value
-// into the provided Go value, similar to [Unmarshal].
+// Unmarshaler is implemented by types that decode themselves through an
+// intermediate Go value. The unmarshal function decodes the type's JSONC
+// value into the value it is given, with the current decode options.
 type Unmarshaler interface {
 	UnmarshalJSONC(unmarshal func(any) error) error
 }
 
-// BytesUnmarshaler is implemented by types that can decode themselves
-// directly from raw JSONC bytes.
+// BytesUnmarshaler is implemented by types that decode themselves from raw
+// JSONC bytes. For an object or array the bytes are the source text,
+// including any comments and trailing commas.
 type BytesUnmarshaler interface {
 	UnmarshalJSONC(data []byte) error
 }
 
-// UnmarshalerContext is like [Unmarshaler] but receives a context, set via
-// [Decoder.DecodeContext].
+// UnmarshalerContext is like [Unmarshaler] but receives the context passed
+// to [Decoder.DecodeContext] or set with [Decoder.SetContext]; other
+// decoding functions pass [context.Background]. Decoders try
+// UnmarshalerContext, then [Unmarshaler], [BytesUnmarshaler],
+// [encoding/json.Unmarshaler] (given standard JSON with comments removed)
+// and, for strings, [encoding.TextUnmarshaler].
 type UnmarshalerContext interface {
 	UnmarshalJSONC(ctx context.Context, unmarshal func(any) error) error
 }

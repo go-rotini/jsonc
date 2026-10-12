@@ -15,16 +15,17 @@ import (
 	"time"
 )
 
-// Marshaler is implemented by types that can encode themselves into raw
-// JSONC bytes. Existing [encoding/json.Marshaler] implementations are also
-// honored at lower priority, so types that already implement that interface
-// continue to work unchanged.
+// Marshaler is implemented by types that encode themselves as JSONC. The
+// returned bytes are written verbatim, without validation. A type's
+// [encoding/json.Marshaler] implementation is used when it has no
+// MarshalJSONC method.
 type Marshaler interface {
 	MarshalJSONC() ([]byte, error)
 }
 
-// MarshalerContext is like [Marshaler] but receives a context, set via
-// [Encoder.EncodeContext].
+// MarshalerContext is like [Marshaler] but receives the context passed to
+// [Encoder.EncodeContext] or set with [Encoder.SetContext]; other encoding
+// functions pass [context.Background]. It takes precedence over [Marshaler].
 type MarshalerContext interface {
 	MarshalJSONC(ctx context.Context) ([]byte, error)
 }

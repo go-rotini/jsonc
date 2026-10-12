@@ -24,9 +24,10 @@ type PatchOp struct {
 // operations applied as a single transformation.
 type Patch []PatchOp
 
-// ParsePatch decodes data (a JSONC array of operation objects) into a
-// [Patch]. Comments and trailing commas in the input are tolerated; the
-// operation values themselves preserve their JSONC source form.
+// ParsePatch decodes data, a JSONC array of operation objects, into a
+// [Patch]. Comments and trailing commas are accepted, and comments inside
+// an operation's value are kept on its AST. Operation names are not checked
+// until [Patch.Apply]. Errors wrap [ErrPatchSyntax].
 func ParsePatch(data []byte) (Patch, error) {
 	type rawOp struct {
 		Op    string   `json:"op"`
@@ -52,10 +53,10 @@ func ParsePatch(data []byte) (Patch, error) {
 	return out, nil
 }
 
-// Apply applies p to root in order, returning the resulting [Node]. The
-// input root is not modified — Apply works on a deep clone. Any failure
-// returns an error and leaves the (cloned) intermediate state unobservable
-// to the caller.
+// Apply applies the operations of p in order to a deep copy of root and
+// returns the result; root itself is not modified. If any operation fails,
+// including a failed "test", Apply returns a nil node and an error naming
+// the operation.
 func (p Patch) Apply(root *Node) (*Node, error) {
 	out := cloneNode(root)
 	for i, op := range p {

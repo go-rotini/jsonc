@@ -450,9 +450,8 @@ func TestValidFunction(t *testing.T) {
 		`"unterminated`,
 		`/* unclosed`,
 	}
-	// Note: the current Valid() only runs the scanner. Some of these would only
-	// be rejected by the parser (Phase 3). For now, only check inputs that the
-	// scanner already rejects.
+	// Valid runs the full parser, so it also rejects parser-level errors such
+	// as `{"a"}`; this loop checks only inputs the scanner itself rejects.
 	scannerRejects := []string{
 		`"unterminated`,
 		`/* unclosed`,

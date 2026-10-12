@@ -14,7 +14,7 @@ const (
 	nodeNumber
 	nodeBool
 	nodeNull
-	nodeComment // orphan comment (used only when a comment cannot be attached to any host node)
+	nodeComment // standalone comment; only comes from a caller-built Node, never from the parser
 )
 
 // commentStyle records whether a comment was a // line comment or a /* */
@@ -76,7 +76,7 @@ const (
 	NumberNode                   // a number scalar
 	BooleanNode                  // a boolean scalar
 	NullNode                     // a null scalar
-	CommentNode                  // an orphan comment
+	CommentNode                  // a standalone comment inside a container; the parser never produces one
 )
 
 // String returns the lowercase JSON-ish name of the node kind, used in
@@ -113,18 +113,19 @@ const (
 	BlockCommentStyle                     // /* ... */
 )
 
-// Node is a JSONC AST node.
+// Node is a JSONC AST node. Comment texts exclude the // and /* */
+// delimiters; stacked comments are joined with newlines.
 type Node struct {
 	Kind         NodeKind
 	Key          string       // for KeyValueNode: the unescaped member name (empty otherwise)
-	Value        string       // for scalar nodes: the unescaped string value (empty for containers)
-	RawValue     string       // for scalar nodes: the source-form bytes (preserves quoting style)
+	Value        string       // for scalar nodes: the unescaped value (numbers keep their source text); for CommentNode: the comment text; empty for containers
+	RawValue     string       // for scalar nodes: the source text, including quotes and escapes; written in preference to Value when set
 	CommentStyle CommentStyle // for CommentNode: which comment style
 	Children     []*Node      // for ObjectNode: KeyValueNode children. For ArrayNode: value children. For KeyValueNode: a single value child.
-	Pos          Position
-	Comment      string // line comment (on the same line, after the value)
-	HeadComment  string // comment block before this node
-	FootComment  string // comment block after the last child but before the closing delimiter (containers only)
+	Pos          Position     // position of the node's first token
+	Comment      string       // comment on the same line, after the value
+	HeadComment  string       // comments on the lines before this node
+	FootComment  string       // comments after this node: for a container, before its closing delimiter; for a member or element, before the following comma
 }
 
 // String returns a concise human-readable representation. For scalars, the
@@ -155,10 +156,9 @@ func (n *Node) String() string {
 	}
 }
 
-// Validate checks structural invariants of the node tree: object key
-// uniqueness, well-formed scalar nodes, KeyValueNode with exactly one
-// child. Returns nil if the tree is valid, else the first violation
-// encountered.
+// Validate checks the tree rooted at n for duplicate object keys
+// ([DuplicateKeyError]) and for KeyValueNodes without exactly one child
+// ([SyntaxError]). It returns the first violation found, or nil.
 func (n *Node) Validate() error {
 	var firstErr error
 	Walk(n, func(node *Node) bool {
@@ -192,14 +192,13 @@ func (n *Node) Validate() error {
 	return firstErr
 }
 
-// File is the result of parsing a JSONC byte stream. JSONC documents
-// represent a single JSON value at the top level (typically an object,
-// but JSON permits any value).
+// File is the result of [Parse].
 type File struct {
-	// Root is the top-level value parsed from the input.
+	// Root is the top-level value parsed from the input. Comments before and
+	// after it are attached to its HeadComment and FootComment.
 	Root *Node
-	// Warnings holds non-fatal advisory messages produced during parsing.
-	// An empty slice (or nil) indicates a clean parse.
+	// Warnings is reserved for non-fatal parse messages; the parser does not
+	// currently produce any, so it is always nil.
 	Warnings []string
 }
 
@@ -235,11 +234,10 @@ func Filter(n *Node, fn func(*Node) bool) []*Node {
 	return result
 }
 
-// Parse tokenizes and parses data into an AST. It accepts JSONC by default
-// (line and block comments, optional trailing commas). Pass [WithStrictJSON]
-// to reject those extensions and require RFC 8259 conformance. Limits like
-// [WithMaxDepth] / [WithMaxKeys] / [WithMaxNodes] / [WithMaxDocumentSize]
-// are honored at parse time.
+// Parse parses data into an AST. It accepts comments and trailing commas
+// unless [WithStrictJSON] is given, and honors [WithMaxDepth],
+// [WithMaxKeys], [WithMaxNodes], [WithMaxDocumentSize] and
+// [WithAllowDuplicateKeys]; other decode options have no effect.
 func Parse(data []byte, opts ...DecodeOption) (*File, error) {
 	o := defaultDecodeOptions()
 	for _, opt := range opts {
@@ -271,16 +269,17 @@ func Parse(data []byte, opts ...DecodeOption) (*File, error) {
 	}, nil
 }
 
-// NodeToBytes serializes a [Node] tree back into JSONC bytes using default
-// encoding options. Comments and structure are preserved.
+// NodeToBytes serializes a [Node] tree using default encoding options, which
+// produce compact output without comments. Use [NodeToBytesWithOptions] with
+// [WithIndent] to keep comments.
 func NodeToBytes(n *Node) ([]byte, error) {
 	internal := importNode(n)
 	enc := newNodeEncoder(defaultEncodeOptions())
 	return enc.encodeNode(internal)
 }
 
-// NodeToBytesWithOptions serializes a [Node] tree back into JSONC bytes
-// using the provided encoding options.
+// NodeToBytesWithOptions serializes a [Node] tree using the given encoding
+// options. Comments are written only in multi-line output.
 func NodeToBytesWithOptions(n *Node, opts ...EncodeOption) ([]byte, error) {
 	o := defaultEncodeOptions()
 	for _, opt := range opts {

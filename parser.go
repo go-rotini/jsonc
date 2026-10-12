@@ -18,8 +18,8 @@ import (
 //   - FootComment: comments after the last child of an array/object, before
 //     the closing delimiter, separated by at least one newline from the
 //     last child.
-//   - Comments that don't fit any slot become CommentNode children of the
-//     enclosing container.
+//   - Comments between a key and its value are dropped. The parser never
+//     produces CommentNode children.
 type parser struct {
 	tokens   []token
 	pos      int
