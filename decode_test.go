@@ -1083,6 +1083,28 @@ func TestDecodeApplyDefaultUnsupportedKind(t *testing.T) {
 	}
 }
 
+func TestDecodeApplyDefaultErrorPos(t *testing.T) {
+	type Inner struct {
+		N int `jsonc:"n,default=abc"`
+	}
+	type S struct {
+		Inner Inner `json:"inner"`
+	}
+	src := []byte("{\n  \"inner\": {}\n}")
+	var v S
+	err := UnmarshalWithOptions(src, &v, WithDefaults())
+	var de *DefaultError
+	if !errors.As(err, &de) {
+		t.Fatalf("err = %v, want *DefaultError", err)
+	}
+	if de.Pos.Line != 2 || de.Pos.Column != 12 {
+		t.Errorf("Pos = %+v, want line 2 column 12", de.Pos)
+	}
+	if !strings.Contains(FormatError(src, err), "^") {
+		t.Errorf("FormatError has no caret:\n%s", FormatError(src, err))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // buildMapKey — every supported key type.
 // ---------------------------------------------------------------------------

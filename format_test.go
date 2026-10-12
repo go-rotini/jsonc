@@ -145,3 +145,108 @@ func TestFormatTrailingBlockCommentRoundTrip(t *testing.T) {
 		t.Errorf("not re-parseable: %v\nout=%q", err, out)
 	}
 }
+
+// TestFormatCommentPlacement pins where Format writes each kind of comment:
+// output equal to the canonical input, and stable when formatted again.
+func TestFormatCommentPlacement(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{
+			name: "head comment on member",
+			in:   "{\n  // head\n  \"a\": 1\n}",
+			want: "{\n  // head\n  \"a\": 1\n}",
+		},
+		{
+			name: "nested head comment",
+			in:   "{\"o\": {\n// x\n\"a\": 1}}",
+			want: "{\n  \"o\": {\n    // x\n    \"a\": 1\n  }\n}",
+		},
+		{
+			name: "no space after slashes",
+			in:   "{\n  //tight\n  \"a\": 1 //also\n}",
+			want: "{\n  // tight\n  \"a\": 1 // also\n}",
+		},
+		{
+			name: "comment after comma stays on its member",
+			in:   "{\n  \"a\": 1, // about a\n  \"b\": 2\n}",
+			want: "{\n  \"a\": 1, // about a\n  \"b\": 2\n}",
+		},
+		{
+			name: "inline comment before comma keeps the comma",
+			in:   "{\n  \"a\": 1 // about a\n  , \"b\": 2\n}",
+			want: "{\n  \"a\": 1, // about a\n  \"b\": 2\n}",
+		},
+		{
+			name: "inline comment after container value",
+			in:   "{\n  \"a\": {\"x\": 1} /* c */,\n  \"b\": 2\n}",
+			want: "{\n  \"a\": {\n    \"x\": 1\n  }, // c\n  \"b\": 2\n}",
+		},
+		{
+			name: "array element comment after comma",
+			in:   "[\n  1, // one\n  2\n]",
+			want: "[\n  1, // one\n  2\n]",
+		},
+		{
+			name: "member foot comment",
+			in:   "{\n  \"a\": 1\n  // after a\n  ,\n  \"b\": 2\n}",
+			want: "{\n  \"a\": 1,\n  // after a\n  \"b\": 2\n}",
+		},
+		{
+			name: "element foot comment",
+			in:   "[\n  1\n  // after 1\n  ,\n  2\n]",
+			want: "[\n  1,\n  // after 1\n  2\n]",
+		},
+		{
+			name: "container foot comment",
+			in:   "{\n  \"a\": 1\n  // end\n}",
+			want: "{\n  \"a\": 1\n  // end\n}",
+		},
+		{
+			name: "trailing root comment",
+			in:   "// top\n{\n  \"a\": 1\n}\n// trailing\n",
+			want: "// top\n{\n  \"a\": 1\n}\n// trailing\n",
+		},
+		{
+			name: "scalar root comments",
+			in:   "// top\n1 // same line\n// after\n",
+			want: "// top\n1 // same line\n// after\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := Format([]byte(tc.in))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(out) != tc.want {
+				t.Fatalf("Format:\n%s\nwant:\n%s", out, tc.want)
+			}
+			again, err := Format(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(again) != tc.want {
+				t.Errorf("Format is not stable:\n%s\nwant:\n%s", again, tc.want)
+			}
+		})
+	}
+}
+
+// TestNodeToBytesCommentPlacement covers the same placement through the
+// public AST.
+func TestNodeToBytesCommentPlacement(t *testing.T) {
+	in := "{\n  // head\n  \"a\": 1, // about a\n  \"b\": [\n    1 // one\n    ,\n    2\n  ]\n}"
+	f, err := Parse([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NodeToBytesWithOptions(f.Root, WithIndent("  "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\n  // head\n  \"a\": 1, // about a\n  \"b\": [\n    1, // one\n    2\n  ]\n}"
+	if string(out) != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out, want)
+	}
+}

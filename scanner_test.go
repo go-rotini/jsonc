@@ -445,20 +445,18 @@ func TestValidFunction(t *testing.T) {
 		}
 	}
 
+	// Valid runs the full parser, so it rejects both scanner-level and
+	// parser-level errors.
 	bad := []string{
 		`{"a"}`, // missing :value (parser-level)
-		`"unterminated`,
-		`/* unclosed`,
-	}
-	// Valid runs the full parser, so it also rejects parser-level errors such
-	// as `{"a"}`; this loop checks only inputs the scanner itself rejects.
-	scannerRejects := []string{
+		`[1 2]`, // missing comma (parser-level)
+		`{} {}`, // extra data after value (parser-level)
+		``,      // no value
 		`"unterminated`,
 		`/* unclosed`,
 		"/* nested /* inner */ leftover */",
 	}
-	_ = bad
-	for _, src := range scannerRejects {
+	for _, src := range bad {
 		if Valid([]byte(src)) {
 			t.Errorf("Valid(%q) = true, want false", src)
 		}

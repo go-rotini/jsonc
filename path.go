@@ -288,8 +288,12 @@ func (p Path) Delete(root *Node) error {
 	parents := mapNodeParents(root)
 	// Reverse iteration so index shifts from earlier deletes don't invalidate
 	// later ones when multiple matches share a parent.
-	for i, target := range slices.Backward(matches) {
-		_ = i
+	for _, target := range slices.Backward(matches) {
+		// A member value's parent is its KeyValueNode; remove the whole
+		// member from the enclosing object.
+		if kv := parents[target]; kv != nil && kv.Kind == KeyValueNode {
+			target = kv
+		}
 		parent, idx := findChild(parents, target)
 		if parent == nil {
 			continue

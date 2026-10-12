@@ -151,7 +151,7 @@ type DefaultError struct {
 	Field string
 	// Message describes why the default could not be applied.
 	Message string
-	// Pos is not set by the decoder; it is always the zero Position.
+	// Pos is the source position of the JSONC object that lacks the field.
 	Pos Position
 }
 
@@ -239,6 +239,9 @@ var (
 	ErrPointerSyntax = errors.New("jsonc: invalid JSON Pointer syntax")
 	// ErrPatchSyntax indicates an invalid RFC 6902 JSON Patch document.
 	ErrPatchSyntax = errors.New("jsonc: invalid JSON Patch syntax")
+	// ErrPatchTestFailed indicates a JSON Patch "test" operation found a
+	// value different from the expected one.
+	ErrPatchTestFailed = errors.New("jsonc: JSON Patch test failed")
 	// ErrNilPointer indicates a nil pointer was passed where a non-nil pointer is required.
 	ErrNilPointer = errors.New("jsonc: non-nil pointer required")
 	// ErrDocumentSize indicates the input exceeds the configured [WithMaxDocumentSize] limit.
@@ -250,8 +253,8 @@ var (
 
 // FormatError formats err for display against the source data. For an
 // error that carries a [Position] ([SyntaxError], [DuplicateKeyError],
-// [OverflowError], [StrictJSONError], [UnknownFieldError] or
-// [ValidationError], possibly wrapped), the output adds the offending source
+// [OverflowError], [StrictJSONError], [UnknownFieldError], [ValidationError]
+// or [DefaultError], possibly wrapped), the output adds the offending source
 // line and a caret under the column. For any other error, or a position
 // outside data, it returns err.Error(). Pass true for color to add ANSI color
 // escape sequences.
@@ -289,6 +292,7 @@ func extractPosition(err error) Position {
 	var ovfErr *OverflowError
 	var unkErr *UnknownFieldError
 	var strErr *StrictJSONError
+	var defErr *DefaultError
 	switch {
 	case errors.As(err, &synErr):
 		return synErr.Pos
@@ -302,6 +306,8 @@ func extractPosition(err error) Position {
 		return unkErr.Pos
 	case errors.As(err, &strErr):
 		return strErr.Pos
+	case errors.As(err, &defErr):
+		return defErr.Pos
 	default:
 		return Position{}
 	}

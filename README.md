@@ -12,7 +12,7 @@ This package is used as the default JSONC support package for [rotini](https://g
 - Comment-preserving round-trips through the AST and `RawValue`
 - Generic `UnmarshalTo[T]` / `MarshalTo[T]` APIs and type-safe custom marshaler/unmarshaler registration
 - Streaming `Encoder` / `Decoder` matching `encoding/json` semantics (`More()`, `InputOffset()`)
-- Struct field tags: `omitempty`, `string` (stdlib), `omitzero`, `commented`, `required`, `default=<value>` (jsonc extensions)
+- Struct field tags: `omitempty`, `omitzero`, `string` (stdlib), `commented`, `required`, `default=<value>` (jsonc extensions)
 - `comment:"text"` separate tag for emitting head comments
 - Encode options: indent, HTML escape, array multiline, comments, trailing commas, custom marshalers
 - Decode options: strict mode, strict-JSON mode, ordered maps, defaults, validators, custom unmarshalers, `UseNumber`

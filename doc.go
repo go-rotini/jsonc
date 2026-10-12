@@ -34,7 +34,6 @@
 //     leaving it unchanged.
 //   - A JSON array decoded into a Go array must have exactly the array's
 //     length.
-//   - The omitzero option is read from the "jsonc" tag only.
 //
 // # JSONC Extensions
 //
@@ -48,8 +47,10 @@
 //
 // The parser attaches comments to nearby AST nodes ([Node.HeadComment],
 // [Node.Comment], [Node.FootComment]). Comments are written back only in
-// multi-line output: [Format] keeps them, while [Minimize] and other compact
-// output drop them. Trailing commas are accepted on input and are not
+// multi-line output: [Format] keeps them in place, as // comments unless a
+// comment spans lines, while [Minimize] and other compact output drop them.
+// A comment between a key and its value has no place in the AST and is
+// dropped, with a warning in [File.Warnings]. Trailing commas are accepted on input and are not
 // carried through; [WithTrailingComma] adds them to multi-line output. Use
 // [WithStrictJSON] to reject these extensions and require strict JSON.
 //
@@ -89,13 +90,15 @@
 //	    Internal string `json:"-"`
 //	}
 //
-// Either tag accepts omitempty, string and "-". The "jsonc" tag adds:
-//   - omitzero: omit the field when it is the zero value.
+// Either tag accepts omitempty, omitzero, string and "-". As in
+// encoding/json, omitzero omits a field whose IsZero method reports true, or
+// which is the zero value when it has none. The "jsonc" tag adds:
 //   - required: decoding fails with a [SyntaxError] when the key is absent
 //     (an explicit null counts as present).
 //   - default=<value>: the value applied when the key is absent; it takes
 //     effect only with [WithDefaults].
-//   - commented: in multi-line output, write the value inside /* */.
+//   - commented: in multi-line output, write the whole member inside /* */,
+//     so it shows as a hint but is not decoded.
 //
 // A separate "comment" tag attaches a head comment to the field in
 // multi-line output:
@@ -147,7 +150,9 @@
 // [ParsePatch] decodes an [RFC 6902] JSON Patch document into a [Patch], and
 // [Patch.Apply] applies all operations (add, remove, replace, move, copy,
 // test) atomically against an AST: the input AST is never modified, and a
-// failing operation returns an error and no result.
+// failing operation returns an error and no result. A failed "test" returns
+// an error wrapping [ErrPatchTestFailed]; it compares values as JSON, so
+// numbers compare by value.
 //
 // # Raw Values
 //

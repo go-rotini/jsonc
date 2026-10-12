@@ -43,6 +43,7 @@ func TestPlainSentinelErrors(t *testing.T) {
 		{"ErrPathNotFound", ErrPathNotFound, "path not found"},
 		{"ErrPointerSyntax", ErrPointerSyntax, "invalid JSON Pointer syntax"},
 		{"ErrPatchSyntax", ErrPatchSyntax, "invalid JSON Patch syntax"},
+		{"ErrPatchTestFailed", ErrPatchTestFailed, "JSON Patch test failed"},
 		{"ErrNilPointer", ErrNilPointer, "non-nil pointer required"},
 		{"ErrDocumentSize", ErrDocumentSize, "document size exceeds limit"},
 		{"ErrUnsupportedValue", ErrUnsupportedValue, "unsupported value"},

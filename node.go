@@ -55,6 +55,9 @@ type node struct {
 	comment     string
 	headComment string
 	footComment string
+	// trailComment holds comments after the document's root value, on
+	// the lines below it. It is set only on the root by the parser.
+	trailComment string
 	// rawBytes captures the verbatim source slice spanning a container
 	// node's opening through closing delimiter, inclusive. It is set only
 	// for ObjectNode and ArrayNode by the parser; scalar nodes use rawValue
@@ -123,7 +126,7 @@ type Node struct {
 	CommentStyle CommentStyle // for CommentNode: which comment style
 	Children     []*Node      // for ObjectNode: KeyValueNode children. For ArrayNode: value children. For KeyValueNode: a single value child.
 	Pos          Position     // position of the node's first token
-	Comment      string       // comment on the same line, after the value
+	Comment      string       // comment on the same line, after the value or its comma
 	HeadComment  string       // comments on the lines before this node
 	FootComment  string       // comments after this node: for a container, before its closing delimiter; for a member or element, before the following comma
 }
@@ -194,11 +197,16 @@ func (n *Node) Validate() error {
 
 // File is the result of [Parse].
 type File struct {
-	// Root is the top-level value parsed from the input. Comments before and
-	// after it are attached to its HeadComment and FootComment.
+	// Root is the top-level value parsed from the input. Comments before it
+	// are attached to its HeadComment, a comment on its last line to its
+	// Comment, and comments on the lines after it to its FootComment. For
+	// an object or array root, [NodeToBytesWithOptions] writes FootComment
+	// before the closing delimiter; [Format] keeps such comments after it.
 	Root *Node
-	// Warnings is reserved for non-fatal parse messages; the parser does not
-	// currently produce any, so it is always nil.
+	// Warnings lists non-fatal parse messages, each prefixed with its line
+	// and column: a duplicate key replaced under [WithAllowDuplicateKeys],
+	// and a comment between a key and its value, which has no place in the
+	// AST and is dropped.
 	Warnings []string
 }
 
@@ -305,7 +313,7 @@ func exportNode(n *node) *Node {
 		Pos:          n.pos,
 		Comment:      n.comment,
 		HeadComment:  n.headComment,
-		FootComment:  n.footComment,
+		FootComment:  appendCommentBlock(n.footComment, n.trailComment),
 	}
 	for _, child := range n.children {
 		out.Children = append(out.Children, exportNode(child))

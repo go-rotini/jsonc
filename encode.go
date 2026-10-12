@@ -72,20 +72,113 @@ func (e *encoder) encodeNode(n *node) ([]byte, error) {
 	if n == nil {
 		return nil, nil
 	}
-	e.writeNode(n, 0)
+	e.writeHeadComments(n, 0)
+	e.writeValue(n, 0)
+	if e.nodeComments() {
+		e.writeLineComments(n)
+		foot := n.trailComment
+		if !isContainer(n) {
+			foot = appendCommentBlock(n.footComment, foot)
+		}
+		if foot != "" {
+			e.buf.WriteByte('\n')
+			e.writeCommentBlock(foot, 0)
+		}
+	}
 	return e.buf.Bytes(), nil
 }
 
-// writeNode emits a single node at the given indent depth.
-func (e *encoder) writeNode(n *node, depth int) {
-	if n == nil {
+// nodeComments reports whether AST comment annotations are written: only
+// in multi-line output that is not strict JSON.
+func (e *encoder) nodeComments() bool {
+	return e.multiline() && !e.opts.strictJSONOutput
+}
+
+// isContainer reports whether n is an object or array, whose foot comment
+// belongs before its closing delimiter.
+func isContainer(n *node) bool {
+	return n.kind == nodeObject || n.kind == nodeArray
+}
+
+// writeHeadComments writes the comments that go on the lines before n. For
+// a member, the value's head comment joins the member's.
+func (e *encoder) writeHeadComments(n *node, depth int) {
+	if !e.nodeComments() {
 		return
 	}
-	// Head comment first, on its own line(s) when output is multi-line.
-	if n.headComment != "" && e.multiline() && !e.opts.strictJSONOutput {
-		e.writeCommentBlock(n.headComment, depth)
+	head := n.headComment
+	if n.kind == nodeKeyValue && len(n.children) > 0 {
+		head = appendCommentBlock(head, n.children[0].headComment)
+	}
+	if head != "" {
+		e.writeCommentBlock(head, depth)
+	}
+}
+
+// writeLineComments writes the comments that go after n on its last line:
+// a member's value's and then n's own. All but the last use the /* */ form
+// so they cannot hide the ones after them.
+func (e *encoder) writeLineComments(n *node) {
+	texts := make([]string, 0, 2)
+	if n.kind == nodeKeyValue && len(n.children) > 0 && n.children[0].comment != "" {
+		texts = append(texts, n.children[0].comment)
+	}
+	if n.comment != "" {
+		texts = append(texts, n.comment)
+	}
+	for i, text := range texts {
+		if i < len(texts)-1 {
+			e.writeInlineBlockComment(text)
+			continue
+		}
+		e.writeInlineComment(text)
+	}
+}
+
+// writeChildren emits the members or elements of a multi-line container,
+// each on its own line at depth, with its comments around it: head
+// comments above, line comments after the comma, and a member's or
+// scalar's foot comment on the lines below.
+func (e *encoder) writeChildren(n *node, depth int) {
+	// Count value-bearing children up front so trailing-comma logic can
+	// distinguish "last member" from "last child" (CommentNode siblings
+	// don't count).
+	memberCount := 0
+	for _, child := range n.children {
+		if child.kind != nodeComment {
+			memberCount++
+		}
 	}
 
+	emitted := 0
+	for _, child := range n.children {
+		if child.kind == nodeComment {
+			if !e.opts.strictJSONOutput {
+				e.writeOrphanComment(child, depth)
+			}
+			continue
+		}
+		e.writeHeadComments(child, depth)
+		e.writeIndent(depth)
+		e.writeValue(child, depth)
+		emitted++
+		if emitted < memberCount || (e.opts.trailingComma && !e.opts.strictJSONOutput) {
+			e.buf.WriteByte(',')
+		}
+		if e.nodeComments() {
+			e.writeLineComments(child)
+		}
+		e.buf.WriteByte('\n')
+		if e.nodeComments() && child.footComment != "" && !isContainer(child) {
+			e.writeCommentBlock(child.footComment, depth)
+		}
+	}
+}
+
+// writeValue emits n without its own head, line or (for a member or
+// scalar) foot comments; [encoder.writeChildren] and
+// [encoder.encodeNode] place those.
+func (e *encoder) writeValue(n *node, depth int) {
 	switch n.kind {
 	case nodeObject:
 		e.writeObject(n, depth)
@@ -95,7 +188,7 @@ func (e *encoder) writeNode(n *node, depth int) {
 		e.writeQuotedString(n.key)
 		e.buf.WriteString(": ")
 		if len(n.children) > 0 {
-			e.writeNode(n.children[0], depth)
+			e.writeValue(n.children[0], depth)
 		} else {
 			e.buf.WriteString("null")
 		}
@@ -115,10 +208,6 @@ func (e *encoder) writeNode(n *node, depth int) {
 		if !e.opts.strictJSONOutput {
 			e.writeOrphanComment(n, depth)
 		}
-	}
-
-	if n.comment != "" && e.multiline() && !e.opts.strictJSONOutput {
-		e.writeInlineComment(n.comment)
 	}
 }
 
@@ -144,7 +233,7 @@ func (e *encoder) writeObjectCompact(n *node) {
 			e.buf.WriteByte(',')
 			e.buf.WriteByte(' ')
 		}
-		e.writeNode(child, 0)
+		e.writeValue(child, 0)
 		first = false
 	}
 	e.buf.WriteByte('}')
@@ -157,36 +246,7 @@ func (e *encoder) writeObjectMultiline(n *node, depth int) {
 	}
 	e.buf.WriteByte('{')
 	e.buf.WriteByte('\n')
-
-	// Count value-bearing members up front so trailing-comma logic can
-	// distinguish "last member" from "last child" (CommentNode siblings
-	// don't count).
-	memberCount := 0
-	for _, child := range n.children {
-		if child.kind != nodeComment {
-			memberCount++
-		}
-	}
-
-	emittedMembers := 0
-	for _, child := range n.children {
-		if child.kind == nodeComment {
-			if !e.opts.strictJSONOutput {
-				e.writeOrphanComment(child, depth+1)
-			}
-			continue
-		}
-		e.writeIndent(depth + 1)
-		e.writeNode(child, depth+1)
-		emittedMembers++
-		if emittedMembers < memberCount {
-			e.buf.WriteByte(',')
-		} else if e.opts.trailingComma && !e.opts.strictJSONOutput {
-			e.buf.WriteByte(',')
-		}
-		e.buf.WriteByte('\n')
-	}
-
+	e.writeChildren(n, depth+1)
 	if n.footComment != "" && !e.opts.strictJSONOutput {
 		e.writeCommentBlock(n.footComment, depth+1)
 	}
@@ -214,7 +274,7 @@ func (e *encoder) writeArrayCompact(n *node) {
 			e.buf.WriteByte(',')
 			e.buf.WriteByte(' ')
 		}
-		e.writeNode(child, 0)
+		e.writeValue(child, 0)
 		first = false
 	}
 	e.buf.WriteByte(']')
@@ -227,33 +287,7 @@ func (e *encoder) writeArrayMultiline(n *node, depth int) {
 	}
 	e.buf.WriteByte('[')
 	e.buf.WriteByte('\n')
-
-	memberCount := 0
-	for _, child := range n.children {
-		if child.kind != nodeComment {
-			memberCount++
-		}
-	}
-
-	emittedMembers := 0
-	for _, child := range n.children {
-		if child.kind == nodeComment {
-			if !e.opts.strictJSONOutput {
-				e.writeOrphanComment(child, depth+1)
-			}
-			continue
-		}
-		e.writeIndent(depth + 1)
-		e.writeNode(child, depth+1)
-		emittedMembers++
-		if emittedMembers < memberCount {
-			e.buf.WriteByte(',')
-		} else if e.opts.trailingComma && !e.opts.strictJSONOutput {
-			e.buf.WriteByte(',')
-		}
-		e.buf.WriteByte('\n')
-	}
-
+	e.writeChildren(n, depth+1)
 	if n.footComment != "" && !e.opts.strictJSONOutput {
 		e.writeCommentBlock(n.footComment, depth+1)
 	}
@@ -272,16 +306,28 @@ func (e *encoder) writeIndent(depth int) {
 }
 
 // writeCommentBlock emits a (possibly multi-line) comment block at the
-// given depth. Each non-empty line is prefixed with "// ". Line endings
-// (\r, \r\n, \n) are normalized so embedded CRs do not prematurely
-// terminate the // comment scope.
+// given depth, one // comment per line. A space follows the // unless the
+// line is empty or already starts with one, and trailing blanks are
+// dropped. Line endings (\r, \r\n, \n) are normalized so embedded CRs do
+// not prematurely terminate the // comment scope.
 func (e *encoder) writeCommentBlock(text string, depth int) {
 	for line := range strings.SplitSeq(normalizeLineEndings(text), "\n") {
 		e.writeIndent(depth)
-		e.buf.WriteString("// ")
-		e.buf.WriteString(line)
+		e.writeLineCommentText(line)
 		e.buf.WriteByte('\n')
 	}
+}
+
+// writeLineCommentText writes "//" and text, with one space between them
+// unless text is blank or starts with a space or tab. Trailing blanks are
+// dropped.
+func (e *encoder) writeLineCommentText(text string) {
+	text = strings.TrimRight(text, " \t")
+	e.buf.WriteString("//")
+	if text != "" && text[0] != ' ' && text[0] != '\t' {
+		e.buf.WriteByte(' ')
+	}
+	e.buf.WriteString(text)
 }
 
 // writeInlineComment emits an inline comment after a value on the same
@@ -290,13 +336,27 @@ func (e *encoder) writeCommentBlock(text string, depth int) {
 // comment does not leak past its intended position.
 func (e *encoder) writeInlineComment(text string) {
 	if strings.ContainsAny(text, "\n\r") {
-		e.buf.WriteString(" /* ")
-		e.buf.WriteString(sanitizeBlockCommentText(text))
-		e.buf.WriteString(" */")
+		e.writeInlineBlockComment(text)
 		return
 	}
-	e.buf.WriteString(" // ")
+	e.buf.WriteByte(' ')
+	e.writeLineCommentText(text)
+}
+
+// writeInlineBlockComment emits text as a /* … */ comment after a value,
+// with a space inside each delimiter unless text already has one there.
+func (e *encoder) writeInlineBlockComment(text string) {
+	text = sanitizeBlockCommentText(text)
+	isBlank := func(c byte) bool { return c == ' ' || c == '\t' || c == '\n' }
+	e.buf.WriteString(" /*")
+	if text == "" || !isBlank(text[0]) {
+		e.buf.WriteByte(' ')
+	}
 	e.buf.WriteString(text)
+	if text == "" || !isBlank(text[len(text)-1]) {
+		e.buf.WriteByte(' ')
+	}
+	e.buf.WriteString("*/")
 }
 
 // normalizeLineEndings collapses \r\n and bare \r to \n so callers can
@@ -341,11 +401,19 @@ func (e *encoder) writeOrphanComment(n *node, depth int) {
 }
 
 // writeQuotedString writes s as a JSON-quoted string, escaping per RFC 8259.
-// HTML escape is applied when opts.escapeHTML is true.
+// When opts.escapeHTML is true, <, > and & and the line separators U+2028
+// and U+2029 are escaped as well, as in encoding/json.
 func (e *encoder) writeQuotedString(s string) {
 	e.buf.WriteByte('"')
-	for i := range len(s) {
+	for i := 0; i < len(s); i++ {
 		c := s[i]
+		// U+2028 and U+2029 encode as E2 80 A8 and E2 80 A9.
+		if c == 0xE2 && e.opts.escapeHTML && i+2 < len(s) && s[i+1] == 0x80 && s[i+2]&^1 == 0xA8 {
+			e.buf.WriteString(`\u202`)
+			e.buf.WriteByte(hexDigit(s[i+2] & 0xF))
+			i += 2
+			continue
+		}
 		switch c {
 		case '"':
 			e.buf.WriteString(`\"`)
@@ -935,7 +1003,7 @@ func (e *encoder) encodeMap(rv reflect.Value, depth int) error {
 		}
 		pairs[i] = mapKV{keyStr: s, val: rv.MapIndex(k)}
 	}
-	sortMapPairs(pairs, e.opts.mapKeyOrder)
+	sortMapPairs(pairs)
 
 	multi := e.multiline()
 	e.buf.WriteByte('{')
@@ -1108,20 +1176,13 @@ type mapKV struct {
 	val    reflect.Value
 }
 
-// sortMapPairs sorts a slice of (key, value) pairs according to the
-// configured ordering policy. For [MapKeyOrderInsertion] applied to a
-// native Go map, "insertion" is whatever order MapKeys() happened to
-// return — meaningful only when the source is a [MapSlice] (handled by
-// encodeMapSlice).
-func sortMapPairs(pairs []mapKV, order MapKeyOrder) {
-	switch order {
-	case MapKeyOrderInsertion:
-		return
-	default:
-		sort.Slice(pairs, func(i, j int) bool {
-			return pairs[i].keyStr < pairs[j].keyStr
-		})
-	}
+// sortMapPairs sorts native map entries by key. Every [MapKeyOrder] sorts
+// them: a Go map has no insertion order, so [MapKeyOrderInsertion] applies
+// only to a [MapSlice] (handled by encodeMapSlice).
+func sortMapPairs(pairs []mapKV) {
+	sort.Slice(pairs, func(i, j int) bool {
+		return pairs[i].keyStr < pairs[j].keyStr
+	})
 }
 
 // encodeStruct emits a struct as a JSONC object, honoring tags, omitempty,
@@ -1165,6 +1226,19 @@ func (e *encoder) encodeStruct(rv reflect.Value, depth int) error {
 	// leading newline to avoid a blank line before '}'.
 	lastFootEmitted := false
 
+	// A `commented` member is written whole inside /* */ in multi-line
+	// output, so it takes no part in comma placement: commas follow only
+	// members that have a later uncommented member.
+	commentedOut := func(em emit) bool {
+		return em.fi.commented && multi && !e.opts.strictJSONOutput
+	}
+	lastActive := -1
+	for i, em := range emits {
+		if !commentedOut(em) {
+			lastActive = i
+		}
+	}
+
 	for i, em := range emits {
 		e.pushPathKey(em.fi.name)
 
@@ -1181,43 +1255,45 @@ func (e *encoder) encodeStruct(rv reflect.Value, depth int) error {
 		if multi {
 			e.writeIndent(depth + 1)
 		}
-		e.writeQuotedString(em.fi.name)
-		e.buf.WriteString(": ")
 
-		if em.fi.commented && !e.opts.strictJSONOutput && multi {
-			// `commented` wraps the encoded value in /* ... */, so there is
-			// no value-position to attach line/foot WithComment annotations
-			// to. Only the head comments above were honored.
+		if commentedOut(em) {
+			// The member is a comment, so it has no value position for
+			// line comments; head and foot comments still apply.
 			e.buf.WriteString("/* ")
+			start := e.buf.Len()
+			e.writeQuotedString(em.fi.name)
+			e.buf.WriteString(": ")
 			if err := e.encodeFieldValue(em.fi, em.val, depth+1); err != nil {
 				e.popPath()
 				return err
 			}
+			body := sanitizeBlockCommentText(string(e.buf.Bytes()[start:]))
+			e.buf.Truncate(start)
+			e.buf.WriteString(body)
 			e.buf.WriteString(" */")
-			e.buf.WriteByte('\n')
-			e.popPath()
-			continue
-		}
+		} else {
+			e.writeQuotedString(em.fi.name)
+			e.buf.WriteString(": ")
+			if err := e.encodeFieldValue(em.fi, em.val, depth+1); err != nil {
+				e.popPath()
+				return err
+			}
 
-		if err := e.encodeFieldValue(em.fi, em.val, depth+1); err != nil {
-			e.popPath()
-			return err
+			// Comma must precede any inline comment so the output reads
+			// `value, // inline` rather than `value // inline,`.
+			switch {
+			case i < lastActive:
+				e.buf.WriteByte(',')
+			case multi && e.opts.trailingComma && !e.opts.strictJSONOutput:
+				e.buf.WriteByte(',')
+			}
+
+			if multi && !e.opts.strictJSONOutput {
+				e.emitInlineComments(e.commentsAt(LineCommentPos))
+			}
 		}
 
 		isLast := i == len(emits)-1
-
-		// Comma must precede any inline comment so the output reads
-		// `value, // inline` rather than `value // inline,`.
-		switch {
-		case !isLast:
-			e.buf.WriteByte(',')
-		case multi && e.opts.trailingComma && !e.opts.strictJSONOutput:
-			e.buf.WriteByte(',')
-		}
-
-		if multi && !e.opts.strictJSONOutput {
-			e.emitInlineComments(e.commentsAt(LineCommentPos))
-		}
 
 		if !isLast {
 			if multi {
@@ -1274,13 +1350,36 @@ func (e *encoder) encodeFieldValue(fi fieldInfo, fv reflect.Value, depth int) er
 // shouldOmit reports whether a field should be omitted under omitempty/
 // omitzero rules.
 func (e *encoder) shouldOmit(fi fieldInfo, fv reflect.Value) bool {
-	if fi.omitZero && fv.IsZero() {
+	if fi.omitZero && isZeroField(fv) {
 		return true
 	}
 	if (fi.omitEmpty || e.opts.omitEmpty) && isEmptyValue(fv) {
 		return true
 	}
 	return false
+}
+
+// isZeroField reports whether fv is zero for omitzero: a nil pointer or
+// interface, the result of an IsZero() bool method when the value has one,
+// or else reflect's zero check. This matches encoding/json.
+func isZeroField(fv reflect.Value) bool {
+	switch fv.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if fv.IsNil() {
+			return true
+		}
+	}
+	if fv.CanInterface() {
+		if z, ok := fv.Interface().(interface{ IsZero() bool }); ok {
+			return z.IsZero()
+		}
+		if fv.CanAddr() {
+			if z, ok := fv.Addr().Interface().(interface{ IsZero() bool }); ok {
+				return z.IsZero()
+			}
+		}
+	}
+	return fv.IsZero()
 }
 
 // fieldByIndexNoAlloc returns the field at the given index path. Unlike the

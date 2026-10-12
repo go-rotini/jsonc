@@ -138,6 +138,28 @@ func TestEncodeStringHTMLOptIn(t *testing.T) {
 	}
 }
 
+func TestEncodeStringHTMLLineSeparators(t *testing.T) {
+	in := "a b c<"
+	want, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := MarshalWithOptions(in, WithEscapeHTML(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("got %s, want %s (encoding/json)", got, want)
+	}
+	raw, err := Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "\"a b c<\"" {
+		t.Errorf("without WithEscapeHTML got %q, want separators unescaped", raw)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Slices and arrays
 // ---------------------------------------------------------------------------
@@ -308,6 +330,28 @@ func TestEncodeStructOmitZero(t *testing.T) {
 	}
 	if string(out) != `{"a": 5}` {
 		t.Errorf("got %q", out)
+	}
+}
+
+type alwaysZero struct{ N int }
+
+func (alwaysZero) IsZero() bool { return true }
+
+type jsonOmitZeroStruct struct {
+	A int        `json:"a,omitzero"`
+	B int        `json:"b,omitzero"`
+	T time.Time  `json:"t,omitzero"`
+	Z alwaysZero `json:"z,omitzero"`
+	P *int       `json:"p,omitzero"`
+}
+
+func TestEncodeStructOmitZeroJSONTag(t *testing.T) {
+	out, err := Marshal(jsonOmitZeroStruct{A: 5, Z: alwaysZero{N: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != `{"a": 5}` {
+		t.Errorf("got %s, want {\"a\": 5}", out)
 	}
 }
 
@@ -1348,8 +1392,54 @@ func TestEncodeCommentedTag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "/* 2 */") {
-		t.Errorf("expected commented form for B, got:\n%s", out)
+	want := "{\n  \"a\": 1\n  /* \"b\": 2 */\n}"
+	if string(out) != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// TestEncodeCommentedTagRoundTrip checks that output with commented
+// members decodes again, with those members absent.
+func TestEncodeCommentedTagRoundTrip(t *testing.T) {
+	type Inner struct {
+		X string `json:"x"`
+	}
+	type S struct {
+		A int    `json:"a" jsonc:",commented"`
+		B int    `json:"b"`
+		C Inner  `json:"c" jsonc:",commented" comment:"about c"`
+		D string `json:"d" jsonc:",commented"`
+	}
+	in := S{A: 1, B: 2, C: Inner{X: "has */ inside"}, D: "last"}
+	for _, opts := range [][]EncodeOption{
+		{WithIndent("  ")},
+		{WithIndent("  "), WithTrailingComma(true)},
+	} {
+		out, err := MarshalWithOptions(in, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got S
+		if err := Unmarshal(out, &got); err != nil {
+			t.Fatalf("output does not decode: %v\n%s", err, out)
+		}
+		if got != (S{B: 2}) {
+			t.Errorf("decoded %+v, want only B set\n%s", got, out)
+		}
+		if !strings.Contains(string(out), "// about c") {
+			t.Errorf("head comment missing:\n%s", out)
+		}
+	}
+
+	type All struct {
+		A int `json:"a" jsonc:",commented"`
+	}
+	out, err := MarshalWithOptions(All{A: 1}, WithIndent("  "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Unmarshal(out, &All{}); err != nil {
+		t.Errorf("all-commented output does not decode: %v\n%s", err, out)
 	}
 }
 
@@ -1505,18 +1595,18 @@ func TestEncodeMarshalerOnPointerReceiver(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEncodeMapWithInsertionOrder(t *testing.T) {
-	// With native map[K]V the insertion order option leaves the
-	// reflect.MapKeys order alone; we just verify the option is read
-	// without producing an error and the output is parseable.
-	out, err := MarshalWithOptions(
-		map[string]int{"a": 1, "b": 2, "c": 3},
-		WithMapKeyOrder(MapKeyOrderInsertion),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Parse(out); err != nil {
-		t.Errorf("not re-parseable: %v\nout=%s", err, out)
+	// A native map has no insertion order, so the encoder falls back to
+	// lexicographic order. Repeat to catch randomized map iteration.
+	m := map[string]int{"e": 5, "c": 3, "a": 1, "d": 4, "b": 2, "f": 6, "h": 8, "g": 7}
+	for range 20 {
+		out, err := MarshalWithOptions(m, WithMapKeyOrder(MapKeyOrderInsertion))
+		if err != nil {
+			t.Fatal(err)
+		}
+		const want = `{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8}`
+		if string(out) != want {
+			t.Fatalf("got %s, want %s", out, want)
+		}
 	}
 }
 

@@ -167,8 +167,45 @@ func TestPatchTestSucceeds(t *testing.T) {
 func TestPatchTestFails(t *testing.T) {
 	root := mustParseRoot(t, `{"a": 1}`)
 	p, _ := ParsePatch([]byte(`[{"op": "test", "path": "/a", "value": 99}]`))
-	if _, err := p.Apply(root); !errors.Is(err, ErrPatchSyntax) {
-		t.Errorf("expected ErrPatchSyntax (test failed), got %v", err)
+	_, err := p.Apply(root)
+	if !errors.Is(err, ErrPatchTestFailed) {
+		t.Errorf("expected ErrPatchTestFailed, got %v", err)
+	}
+	if errors.Is(err, ErrPatchSyntax) {
+		t.Errorf("a failed test is not a syntax error: %v", err)
+	}
+}
+
+func TestPatchTestComparesNumbersByValue(t *testing.T) {
+	root := mustParseRoot(t, `{"a": 1, "b": [100], "c": -0, "d": 0.5}`)
+	for _, tc := range []struct {
+		path, value string
+		want        bool
+	}{
+		{"/a", "1.0", true},
+		{"/a", "1e0", true},
+		{"/a", "10E-1", true},
+		{"/a", "1.5", false},
+		{"/b/0", "1e2", true},
+		{"/b/0", "0.1e3", true},
+		{"/b/0", "1e3", false},
+		{"/c", "0", true},
+		{"/c", "0.0e5", true},
+		{"/d", "5e-1", true},
+		{"/d", "-0.5", false},
+		{"/a", `"1"`, false},
+	} {
+		p, err := ParsePatch([]byte(`[{"op": "test", "path": "` + tc.path + `", "value": ` + tc.value + `}]`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = p.Apply(root)
+		if got := err == nil; got != tc.want {
+			t.Errorf("test %s == %s: passed=%v, want %v (err %v)", tc.path, tc.value, got, tc.want, err)
+		}
+		if err != nil && !errors.Is(err, ErrPatchTestFailed) {
+			t.Errorf("test %s == %s: err = %v, want ErrPatchTestFailed", tc.path, tc.value, err)
+		}
 	}
 }
 

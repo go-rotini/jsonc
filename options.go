@@ -69,8 +69,8 @@ func WithIndentN(n int) EncodeOption {
 }
 
 // WithEscapeHTML controls whether <, > and & in strings are written as
-// \u00XX escapes. The default is false; [encoding/json] escapes them by
-// default.
+// \u00XX escapes, and U+2028 and U+2029 as   and  . The default
+// is false; [encoding/json] escapes them by default.
 func WithEscapeHTML(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.escapeHTML = b }
 }

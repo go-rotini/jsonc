@@ -199,10 +199,13 @@ func TestParseHeadComment(t *testing.T) {
 func TestParseInlineComment(t *testing.T) {
 	src := `42 // inline`
 	f := mustParse(t, src)
-	if !strings.Contains(f.Root.FootComment, "inline") {
-		// Trailing comment after a top-level value is captured as foot
-		// (no following content).
-		t.Errorf("FootComment = %q, want contains 'inline'", f.Root.FootComment)
+	// A same-line comment after a scalar root is its line comment, as for
+	// a container root.
+	if f.Root.Comment != " inline" {
+		t.Errorf("Comment = %q, want %q", f.Root.Comment, " inline")
+	}
+	if f.Root.FootComment != "" {
+		t.Errorf("FootComment = %q, want empty", f.Root.FootComment)
 	}
 }
 

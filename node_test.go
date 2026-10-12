@@ -2,6 +2,7 @@ package jsonc
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -603,5 +604,29 @@ func TestEncodeASTKeyValueNodeWithoutChild(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"missing": null`) {
 		t.Errorf("expected null fallback for child-less KV, got %s", out)
+	}
+}
+
+func TestParseWarnings(t *testing.T) {
+	f, err := Parse([]byte(`{"a": 1, "a" /* k */ : // v
+2}`), WithAllowDuplicateKeys())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"line 1, column 14: comment between a key and its value is dropped",
+		"line 1, column 24: comment between a key and its value is dropped",
+		`line 1, column 10: duplicate key "a"; the last value wins`,
+	}
+	if !slices.Equal(f.Warnings, want) {
+		t.Errorf("Warnings = %q, want %q", f.Warnings, want)
+	}
+
+	clean, err := Parse([]byte(`{"a": 1} // ok`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clean.Warnings != nil {
+		t.Errorf("Warnings = %q, want nil", clean.Warnings)
 	}
 }

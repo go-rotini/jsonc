@@ -29,10 +29,9 @@ type fieldInfo struct {
 //   - field name: jsonc tag name wins if non-empty; else json tag name; else
 //     the Go field name (caller fills in if both tag names are empty).
 //   - "-": skip if either tag has it.
-//   - "omitempty", "string": honored from either tag.
-//   - "omitzero", "commented", "required", "default=<value>": honored from
-//     the jsonc tag only (silently ignored if placed in the json tag —
-//     stdlib won't recognize them anyway).
+//   - "omitempty", "omitzero", "string": honored from either tag.
+//   - "commented", "required", "default=<value>": honored from the jsonc tag
+//     only (ignored in the json tag).
 func parseTagPair(jsonTag, jsoncTag string) fieldInfo {
 	var fi fieldInfo
 
@@ -59,6 +58,8 @@ func parseTagPair(jsonTag, jsoncTag string) fieldInfo {
 			switch opt {
 			case "omitempty":
 				fi.omitEmpty = true
+			case "omitzero":
+				fi.omitZero = true
 			case "string":
 				fi.asString = true
 			}
@@ -68,8 +69,6 @@ func parseTagPair(jsonTag, jsoncTag string) fieldInfo {
 	// JSONC-only options honored from the jsonc tag.
 	for _, opt := range jsoncOpts {
 		switch opt {
-		case "omitzero":
-			fi.omitZero = true
 		case "commented":
 			fi.commented = true
 		case "required":

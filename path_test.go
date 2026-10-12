@@ -280,6 +280,16 @@ func TestPathDelete(t *testing.T) {
 	if _, err := pNew.ReadFirst(root); !errors.Is(err, ErrPathNotFound) {
 		t.Error("expected b to be deleted")
 	}
+	if len(root.Children) != 2 {
+		t.Fatalf("root has %d members, want 2 (the member, key included, must be removed)", len(root.Children))
+	}
+	out, err := NodeToBytes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != `{"a": 1, "c": 3}` {
+		t.Errorf("encoded = %s, want {\"a\": 1, \"c\": 3}", out)
+	}
 	// other fields still present
 	pa, _ := PathString("$.a")
 	if v, _ := pa.ReadString(root); v != "1" {
@@ -371,6 +381,9 @@ func TestPathDeleteValueWrappedInKV(t *testing.T) {
 	verify, _ := PathString("$.a")
 	if _, err := verify.ReadFirst(root); !errors.Is(err, ErrPathNotFound) {
 		t.Error("expected $.a to be deleted")
+	}
+	if len(root.Children) != 0 {
+		t.Errorf("root has %d members, want 0", len(root.Children))
 	}
 }
 

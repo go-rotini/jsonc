@@ -14,12 +14,13 @@ import (
 //     token by at least one newline. Multiple stacked comments form a
 //     newline-joined string.
 //   - Comment (inline): a single comment on the same line as the value's
-//     last token.
-//   - FootComment: comments after the last child of an array/object, before
-//     the closing delimiter, separated by at least one newline from the
-//     last child.
-//   - Comments between a key and its value are dropped. The parser never
-//     produces CommentNode children.
+//     last token, before or just after the following comma.
+//   - FootComment: for a container, comments before its closing delimiter
+//     on lines after the last child; for a member or element, comments on
+//     the lines between it and its comma.
+//   - trailComment: comments after the root value, on later lines.
+//   - Comments between a key and its value are dropped, with a warning.
+//     The parser never produces CommentNode children.
 type parser struct {
 	tokens   []token
 	pos      int
@@ -70,6 +71,11 @@ func (p *parser) parse() (*node, error) {
 		} else {
 			root.headComment = leadHead + "\n" + root.headComment
 		}
+	}
+	// A container collects its own same-line comment after its closing
+	// delimiter; a scalar root collects it here.
+	if root.comment == "" {
+		root.comment = p.collectTrailingInlineComment()
 	}
 
 	if err := p.consumeTrailing(root); err != nil {
@@ -169,6 +175,7 @@ func (p *parser) parseObject() (*node, error) {
 		} else {
 			for i, existing := range obj.children {
 				if existing.kind == nodeKeyValue && existing.key == member.key {
+					p.warnf(member.pos, "duplicate key %q; the last value wins", member.key)
 					obj.children = append(obj.children[:i], obj.children[i+1:]...)
 					break
 				}
@@ -197,6 +204,7 @@ func (p *parser) parseObject() (*node, error) {
 			}
 			p.bump()
 			justConsumedComma = true
+			p.attachAfterComma(member)
 		case tokenObjectEnd:
 			if between != "" {
 				obj.footComment = appendCommentBlock(obj.footComment, between)
@@ -227,7 +235,7 @@ func (p *parser) parseMember(head string) (*node, error) {
 	}
 	p.bump()
 
-	p.skipWhitespaceCommentsAndNewlines()
+	p.skipDroppedComments()
 
 	tk = p.peek()
 	if tk.kind != tokenNameSeparator {
@@ -237,7 +245,7 @@ func (p *parser) parseMember(head string) (*node, error) {
 		}
 	}
 	p.bump()
-	p.skipWhitespaceCommentsAndNewlines()
+	p.skipDroppedComments()
 
 	val, err := p.parseValue()
 	if err != nil {
@@ -314,6 +322,7 @@ func (p *parser) parseArray() (*node, error) {
 			}
 			p.bump()
 			justConsumedComma = true
+			p.attachAfterComma(val)
 		case tokenArrayEnd:
 			if between != "" {
 				arr.footComment = appendCommentBlock(arr.footComment, between)
@@ -441,20 +450,42 @@ func (p *parser) collectTrailingInlineComment() string {
 	}
 }
 
-// skipWhitespaceCommentsAndNewlines consumes any combination of
-// whitespace, newlines, and comments. Comments encountered are dropped (no
-// node attached) — used for the very few JSONC positions where a comment
-// has no clear annotation slot (e.g., between a key and its ':').
-func (p *parser) skipWhitespaceCommentsAndNewlines() {
+// attachAfterComma gives n a comment that follows its comma on the same
+// line, as in `"a": 1, // about a`, so it is not taken as the next
+// member's head comment. It becomes n's line comment, or joins n's foot
+// comment when n already has one.
+func (p *parser) attachAfterComma(n *node) {
+	c := p.collectTrailingInlineComment()
+	switch {
+	case c == "":
+	case n.comment == "":
+		n.comment = c
+	default:
+		n.footComment = appendCommentBlock(n.footComment, c)
+	}
+}
+
+// skipDroppedComments consumes any combination of newlines and comments in
+// a position with no annotation slot (between a key and its ':' or value).
+// Each dropped comment adds a warning.
+func (p *parser) skipDroppedComments() {
 	for {
 		tk := p.peek()
 		switch tk.kind {
-		case tokenNewline, tokenLineComment, tokenBlockComment:
+		case tokenNewline:
+			p.bump()
+		case tokenLineComment, tokenBlockComment:
+			p.warnf(tk.pos, "comment between a key and its value is dropped")
 			p.bump()
 		default:
 			return
 		}
 	}
+}
+
+// warnf records a non-fatal parse message, prefixed with its position.
+func (p *parser) warnf(pos Position, format string, args ...any) {
+	p.warnings = append(p.warnings, fmt.Sprintf("line %d, column %d: ", pos.Line, pos.Column)+fmt.Sprintf(format, args...))
 }
 
 // consumeTrailing handles tokens after the root value. Whitespace, newlines,
@@ -469,7 +500,7 @@ func (p *parser) consumeTrailing(root *node) error {
 		case tokenNewline:
 			p.bump()
 		case tokenLineComment, tokenBlockComment:
-			root.footComment = appendCommentBlock(root.footComment, tk.value)
+			root.trailComment = appendCommentBlock(root.trailComment, tk.value)
 			p.bump()
 		default:
 			return &SyntaxError{

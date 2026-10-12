@@ -73,13 +73,8 @@ func TestParseTagPairAsString(t *testing.T) {
 }
 
 func TestParseTagPairJSONCOnlyOptions(t *testing.T) {
-	// omitzero, commented, required, default= are jsonc-only.
-	fi := parseTagPair(``, `name,omitzero`)
-	if !fi.omitZero {
-		t.Error(`jsonc:"name,omitzero" failed`)
-	}
-
-	fi = parseTagPair(``, `name,commented`)
+	// commented, required, default= are jsonc-only.
+	fi := parseTagPair(``, `name,commented`)
 	if !fi.commented {
 		t.Error(`jsonc:"name,commented" failed`)
 	}
@@ -99,8 +94,8 @@ func TestParseTagPairJSONCOnlyOptions(t *testing.T) {
 func TestParseTagPairJSONCOnlyOptionsIgnoredInJSONTag(t *testing.T) {
 	// jsonc-only options placed in the json tag are silently ignored
 	// (stdlib wouldn't recognize them either).
-	fi := parseTagPair(`name,omitzero,commented,required,default=8080`, ``)
-	if fi.omitZero || fi.commented || fi.required || fi.hasDefault {
+	fi := parseTagPair(`name,commented,required,default=8080`, ``)
+	if fi.commented || fi.required || fi.hasDefault {
 		t.Errorf("jsonc-only options leaked from json tag: %+v", fi)
 	}
 }

@@ -3,6 +3,7 @@ package jsonc
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -55,8 +56,8 @@ func ParsePatch(data []byte) (Patch, error) {
 
 // Apply applies the operations of p in order to a deep copy of root and
 // returns the result; root itself is not modified. If any operation fails,
-// including a failed "test", Apply returns a nil node and an error naming
-// the operation.
+// Apply returns a nil node and an error naming the operation. A failed
+// "test" wraps [ErrPatchTestFailed].
 func (p Patch) Apply(root *Node) (*Node, error) {
 	out := cloneNode(root)
 	for i, op := range p {
@@ -330,13 +331,14 @@ func opTest(root *Node, path string, value *Node) (*Node, error) {
 		}
 	}
 	if !nodeEqual(target, value) {
-		return nil, fmt.Errorf("%w: test failed at %q", ErrPatchSyntax, path)
+		return nil, fmt.Errorf("%w at %q", ErrPatchTestFailed, path)
 	}
 	return root, nil
 }
 
-// nodeEqual reports whether two nodes are equal as JSON values, ignoring
-// comments and source form. Used by the "test" operation.
+// nodeEqual reports whether two nodes are equal as JSON values (RFC 6902
+// section 4.6), ignoring comments and source form: numbers compare by
+// numeric value, so 1, 1.0 and 1e0 are equal. Used by the "test" operation.
 func nodeEqual(a, b *Node) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -345,7 +347,9 @@ func nodeEqual(a, b *Node) bool {
 		return false
 	}
 	switch a.Kind {
-	case StringNode, NumberNode, BooleanNode, NullNode:
+	case NumberNode:
+		return numbersEqual(a.Value, b.Value)
+	case StringNode, BooleanNode, NullNode:
 		return a.Value == b.Value
 	case ArrayNode:
 		av := nonCommentChildren(a)
@@ -398,4 +402,64 @@ func objectMembers(n *Node) map[string]*Node {
 		out[c.Key] = c.Children[0]
 	}
 	return out
+}
+
+// numbersEqual reports whether two JSON number texts denote the same value.
+// Text that is not a JSON number compares as text.
+func numbersEqual(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ca, okA := canonicalNumber(a)
+	cb, okB := canonicalNumber(b)
+	if !okA || !okB {
+		return false
+	}
+	return ca == cb
+}
+
+// canonicalNumber rewrites a JSON number as sign, significant digits and a
+// decimal exponent (e.g. "-1.50e2" becomes "-15e1"), so equal values have
+// equal text. Zero of either sign becomes "0". It reports false for text
+// that is not a JSON number or whose exponent overflows an int.
+func canonicalNumber(s string) (string, bool) {
+	neg := false
+	if s != "" && s[0] == '-' {
+		neg = true
+		s = s[1:]
+	}
+	mant, expText, hasExp := strings.Cut(strings.ToLower(s), "e")
+	intPart, frac, _ := strings.Cut(mant, ".")
+	if intPart == "" {
+		return "", false
+	}
+	digits := intPart + frac
+	for i := range len(digits) {
+		if digits[i] < '0' || digits[i] > '9' {
+			return "", false
+		}
+	}
+	exp := 0
+	if hasExp {
+		e, err := strconv.Atoi(expText)
+		if err != nil {
+			return "", false
+		}
+		exp = e
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return "0", true
+	}
+	trimmed := strings.TrimRight(digits, "0")
+	shift := len(digits) - len(trimmed) - len(frac)
+	if (shift > 0 && exp > math.MaxInt-shift) || (shift < 0 && exp < math.MinInt-shift) {
+		return "", false
+	}
+	exp += shift
+	sign := ""
+	if neg {
+		sign = "-"
+	}
+	return sign + trimmed + "e" + strconv.Itoa(exp), true
 }
