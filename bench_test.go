@@ -100,6 +100,31 @@ func BenchmarkMarshalConfig(b *testing.B) {
 	}
 }
 
+type benchID string
+
+func (i benchID) MarshalJSON() ([]byte, error) { return []byte(`"` + string(i) + `"`), nil }
+
+type benchRecord struct {
+	ID   benchID         `json:"id"`
+	Name string          `json:"name"`
+	Raw  json.RawMessage `json:"raw"`
+}
+
+// BenchmarkMarshalMarshalers encodes records whose fields go through
+// MarshalJSON and json.RawMessage, whose output is re-laid out.
+func BenchmarkMarshalMarshalers(b *testing.B) {
+	recs := make([]benchRecord, 2000)
+	for i := range recs {
+		recs[i] = benchRecord{ID: benchID(fmt.Sprint("id-", i)), Name: "n", Raw: json.RawMessage(`{"k":[1,2,3],"v":"x"}`)}
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := Marshal(recs); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkFormatConfig(b *testing.B) {
 	b.SetBytes(int64(len(benchConfigData)))
 	b.ReportAllocs()

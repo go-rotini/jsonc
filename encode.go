@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,7 +20,9 @@ import (
 // Marshaler is implemented by types that encode themselves as JSONC. The
 // returned bytes must hold exactly one JSONC value; the encoder parses
 // them and writes the value in the surrounding output's layout, so
-// indentation and [WithStrictJSONOutput] apply. A type's
+// indentation and [WithStrictJSONOutput] apply. Comments before or after
+// the value are dropped; comments inside it are kept in multi-line
+// output that is not strict JSON. A type's
 // [encoding/json.Marshaler] implementation is used when it has no
 // MarshalJSONC method.
 type Marshaler interface {
@@ -273,14 +276,22 @@ func (e *encoder) writeValue(n *node, depth int) {
 	}
 }
 
-// writeSourceString writes a string from its source text raw when it has
-// one that is valid UTF-8, and otherwise quotes value.
+// writeSourceString writes a string from its source text raw when
+// [encoder.rawStringOK] allows it, and otherwise quotes value.
 func (e *encoder) writeSourceString(raw, value string) {
-	if raw != "" && utf8.ValidString(raw) {
+	if e.rawStringOK(raw) {
 		e.buf.WriteString(raw)
 		return
 	}
 	e.writeQuotedString(value)
+}
+
+// rawStringOK reports whether a string's source text raw can be written as
+// is: it is valid UTF-8 and, under [WithEscapeHTML], holds none of the
+// characters that option escapes.
+func (e *encoder) rawStringOK(raw string) bool {
+	return raw != "" && utf8.ValidString(raw) &&
+		(!e.opts.escapeHTML || !strings.ContainsAny(raw, "<>&\u2028\u2029"))
 }
 
 // writeObject emits an object container. It dispatches to a multi-line or
@@ -760,22 +771,24 @@ func (e *encoder) encodeSpecialType(rv reflect.Value, depth int) (bool, error) {
 		}
 		// The bytes must be one JSONC value. In strict-JSON-output mode the
 		// parsed value is re-emitted to drop comments and trailing commas;
-		// otherwise the source text is written verbatim.
+		// otherwise the source text is written verbatim, less the blanks
+		// around it and any comments after a // comment that follows it,
+		// which would hide what comes next.
 		if !e.opts.strictJSONOutput {
 			if _, err := parseEmbedded(raw, false); err != nil {
 				return true, fmt.Errorf("jsonc: invalid RawValue: %w", err)
 			}
-			e.buf.Write(raw)
+			e.buf.Write(rawValueText(raw))
 			return true, nil
 		}
-		return true, e.writeEmbedded(raw, false, depth, "RawValue")
+		return true, e.writeEmbedded(raw, false, depth, "RawValue", nil)
 	case reflect.TypeFor[json.RawMessage]():
 		raw := rv.Bytes()
 		if len(raw) == 0 {
 			e.buf.WriteString("null")
 			return true, nil
 		}
-		return true, e.writeEmbedded(raw, true, depth, "json.RawMessage")
+		return true, e.writeEmbedded(raw, true, depth, "json.RawMessage", nil)
 	case reflect.TypeFor[json.Number]():
 		s := rv.String()
 		if s == "" {
@@ -859,6 +872,41 @@ func (e *encoder) encodeSpecialType(rv reflect.Value, depth int) (bool, error) {
 	return false, nil
 }
 
+// rawValueText returns the part of raw, a valid JSONC value, that a
+// RawValue writes: from its first token to its last, or to the end of the
+// value when a // comment follows the value.
+func rawValueText(raw []byte) []byte {
+	sc := scanner{src: raw, line: 1, col: 1, rawOnly: true}
+	start, valueEnd, end := -1, 0, 0
+	lineCommentAfter := false
+	for {
+		tok, err := sc.nextValueToken()
+		if err != nil || tok.kind == tokenEOF {
+			break
+		}
+		if start < 0 {
+			start = tok.pos.Offset
+		}
+		switch tok.kind {
+		case tokenLineComment:
+			lineCommentAfter = true
+			end = sc.pos
+		case tokenBlockComment:
+			end = sc.pos
+		default:
+			valueEnd, end = sc.pos, sc.pos
+			lineCommentAfter = false
+		}
+	}
+	if start < 0 {
+		return raw
+	}
+	if lineCommentAfter {
+		return raw[start:valueEnd]
+	}
+	return raw[start:end]
+}
+
 // encodeCustomMarshaler invokes a user-registered marshaler for rv's type,
 // if one exists, and writes its output with [encoder.writeEmbedded].
 func (e *encoder) encodeCustomMarshaler(rv reflect.Value, depth int) (bool, error) {
@@ -880,7 +928,7 @@ func (e *encoder) encodeCustomMarshaler(rv reflect.Value, depth int) (bool, erro
 	if !ok {
 		return true, fmt.Errorf("%w: custom marshaler for %s did not return []byte", ErrUnsupportedValue, rv.Type())
 	}
-	return true, e.writeEmbedded(out, false, depth, "custom marshaler for "+rv.Type().String())
+	return true, e.writeEmbedded(out, false, depth, "custom marshaler", rv.Type())
 }
 
 // encodeMarshaler dispatches to user-defined marshaler interfaces in
@@ -916,21 +964,21 @@ func (e *encoder) encodeMarshalerForValue(rv reflect.Value, depth int) (bool, er
 		if err != nil {
 			return true, err
 		}
-		return true, e.writeEmbedded(out, false, depth, "MarshalJSONC for "+rv.Type().String())
+		return true, e.writeEmbedded(out, false, depth, "MarshalJSONC", rv.Type())
 	}
 	if m, ok := iface.(Marshaler); ok {
 		out, err := m.MarshalJSONC()
 		if err != nil {
 			return true, err
 		}
-		return true, e.writeEmbedded(out, false, depth, "MarshalJSONC for "+rv.Type().String())
+		return true, e.writeEmbedded(out, false, depth, "MarshalJSONC", rv.Type())
 	}
 	if m, ok := iface.(json.Marshaler); ok {
 		out, err := m.MarshalJSON()
 		if err != nil {
 			return true, err
 		}
-		return true, e.writeEmbedded(out, true, depth, "MarshalJSON for "+rv.Type().String())
+		return true, e.writeEmbedded(out, true, depth, "MarshalJSON", rv.Type())
 	}
 	if m, ok := iface.(encoding.TextMarshaler); ok {
 		text, err := m.MarshalText()
@@ -952,20 +1000,297 @@ const embeddedMaxDepth = 10000
 // otherwise JSONC. Duplicate keys are allowed, as encoding/json allows
 // them in such output; the last one wins.
 func parseEmbedded(data []byte, strictJSON bool) (*node, error) {
+	if bytes.HasPrefix(data, utf8BOM) {
+		return nil, &SyntaxError{Message: "unexpected byte order mark", Pos: Position{Line: 1, Column: 1}}
+	}
 	opts := &decoderOptions{strictJSON: strictJSON, allowDuplicateKeys: true, maxDepth: embeddedMaxDepth}
 	return newParser(data, opts).parse()
 }
 
 // writeEmbedded validates data with [parseEmbedded] and writes the value at
 // depth in the encoder's layout, so indentation and strict JSON output
-// apply. what names the source in the error.
-func (e *encoder) writeEmbedded(data []byte, strictJSON bool, depth int, what string) error {
+// apply. source, and t when not nil, name the source in the error.
+func (e *encoder) writeEmbedded(data []byte, strictJSON bool, depth int, source string, t reflect.Type) error {
+	if e.relayout(data, strictJSON, depth) {
+		return nil
+	}
 	n, err := parseEmbedded(data, strictJSON)
 	if err != nil {
-		return fmt.Errorf("jsonc: invalid output from %s: %w", what, err)
+		if t != nil {
+			source += " for " + t.String()
+		}
+		return fmt.Errorf("jsonc: invalid output from %s (the position is within that output): %w", source, err)
 	}
 	e.writeValue(n, depth)
 	return nil
+}
+
+// relayout writes data as [encoder.writeEmbedded] would, without building
+// a tree, when data is plain JSON: no comments, trailing commas or
+// duplicate keys. Otherwise it writes nothing and returns false, and the
+// caller takes the tree path, which writes the same output or reports the
+// error.
+func (e *encoder) relayout(data []byte, strictJSON bool, depth int) bool {
+	start := e.buf.Len()
+	ok, scalar := e.relayoutScalar(data, strictJSON)
+	if !scalar {
+		ok = e.relayoutTokens(data, strictJSON, depth)
+	}
+	if !ok {
+		e.buf.Truncate(start)
+	}
+	return ok
+}
+
+// relayoutScalar handles data whose first token is a scalar, the usual
+// output of a marshaler. scalar reports whether it did; ok whether data
+// was that scalar alone, now written.
+func (e *encoder) relayoutScalar(data []byte, strictJSON bool) (ok, scalar bool) {
+	sc := scanner{src: data, line: 1, col: 1, strictJSON: strictJSON, rawOnly: true}
+	tok, err := sc.nextValueToken()
+	if err != nil {
+		return false, true
+	}
+	raw := data[tok.pos.Offset:sc.pos]
+	switch tok.kind {
+	case tokenString:
+		if !e.relayoutString(raw) {
+			return false, true
+		}
+	case tokenNumber, tokenTrue, tokenFalse, tokenNull:
+		e.buf.Write(raw)
+	default:
+		return false, false
+	}
+	tok, err = sc.nextValueToken()
+	return err == nil && tok.kind == tokenEOF, true
+}
+
+// nextValueToken is [scanner.next] skipping line breaks.
+func (s *scanner) nextValueToken() (token, error) {
+	for {
+		tok, err := s.next()
+		if err != nil || tok.kind != tokenNewline {
+			return tok, err
+		}
+	}
+}
+
+// relayoutFrame is an object or array open during [encoder.relayout].
+type relayoutFrame struct {
+	object    bool
+	multiline bool
+	depth     int // the container's depth; its children are at depth+1
+	children  int // children written so far
+	keys      int // index in the keys slice of this object's first key
+}
+
+// What [encoder.relayoutTokens] expects next.
+const (
+	relayoutValue = iota // a value; in an array, or ']' unless after a comma
+	relayoutKey          // a key; or '}' unless after a comma
+	relayoutColon        // ':' after a key
+	relayoutNext         // ',' or the closing delimiter; the end after the root
+)
+
+func (e *encoder) relayoutTokens(data []byte, strictJSON bool, depth int) bool {
+	sc := scanner{src: data, line: 1, col: 1, strictJSON: strictJSON, rawOnly: true}
+	var stackBuf [8]relayoutFrame
+	stack := stackBuf[:0]
+	var keysBuf [16][]byte
+	keys := keysBuf[:0] // keys of the open objects, for the duplicate check
+	want := relayoutValue
+	afterComma := false
+	for {
+		tok, err := sc.next()
+		if err != nil {
+			return false
+		}
+		raw := data[tok.pos.Offset:sc.pos]
+		switch tok.kind {
+		case tokenNewline:
+			continue
+		case tokenEOF:
+			return want == relayoutNext && len(stack) == 0
+		}
+		var top *relayoutFrame
+		if len(stack) > 0 {
+			top = &stack[len(stack)-1]
+		}
+		switch want {
+		case relayoutKey:
+			if tok.kind == tokenObjectEnd && !afterComma {
+				if !e.relayoutClose(top, keys) {
+					return false
+				}
+				keys = keys[:top.keys]
+				stack = stack[:len(stack)-1]
+				want = relayoutNext
+				continue
+			}
+			if tok.kind != tokenString {
+				return false
+			}
+			key, ok := relayoutKeyText(raw)
+			if !ok {
+				return false
+			}
+			keys = append(keys, key)
+			e.relayoutChild(top)
+			if !e.relayoutString(raw) {
+				return false
+			}
+			want = relayoutColon
+		case relayoutColon:
+			if tok.kind != tokenNameSeparator {
+				return false
+			}
+			e.buf.WriteString(": ")
+			want = relayoutValue
+			afterComma = false
+		case relayoutValue:
+			if tok.kind == tokenArrayEnd && top != nil && !top.object && !afterComma {
+				e.relayoutClose(top, nil)
+				stack = stack[:len(stack)-1]
+				want = relayoutNext
+				continue
+			}
+			if top != nil && !top.object {
+				e.relayoutChild(top)
+			}
+			switch tok.kind {
+			case tokenObjectStart, tokenArrayStart:
+				if len(stack) >= embeddedMaxDepth {
+					return false
+				}
+				d := depth
+				if top != nil {
+					d = top.depth + 1
+				}
+				object := tok.kind == tokenObjectStart
+				e.buf.WriteByte(raw[0])
+				stack = append(stack, relayoutFrame{
+					object:    object,
+					multiline: e.multiline() || (!object && e.opts.arrayMultiline),
+					depth:     d,
+					keys:      len(keys),
+				})
+				want = relayoutValue
+				if object {
+					want = relayoutKey
+				}
+				afterComma = false
+				continue
+			case tokenString:
+				if !e.relayoutString(raw) {
+					return false
+				}
+			case tokenNumber, tokenTrue, tokenFalse, tokenNull:
+				e.buf.Write(raw)
+			default:
+				return false
+			}
+			want = relayoutNext
+		case relayoutNext:
+			switch {
+			case top == nil:
+				return false
+			case tok.kind == tokenValueSeparator:
+				afterComma = true
+				want = relayoutValue
+				if top.object {
+					want = relayoutKey
+				}
+			case (tok.kind == tokenObjectEnd && top.object) || (tok.kind == tokenArrayEnd && !top.object):
+				if !e.relayoutClose(top, keys) {
+					return false
+				}
+				keys = keys[:top.keys]
+				stack = stack[:len(stack)-1]
+				afterComma = false
+			default:
+				return false
+			}
+		}
+	}
+}
+
+// relayoutChild writes what goes before a container's next child: the
+// separator after the previous one, then the line break and indentation
+// in multi-line layout.
+func (e *encoder) relayoutChild(f *relayoutFrame) {
+	switch {
+	case f.children > 0 && f.multiline:
+		e.buf.WriteString(",\n")
+	case f.children > 0:
+		e.buf.WriteString(", ")
+	case f.multiline:
+		e.buf.WriteByte('\n')
+	}
+	if f.multiline {
+		e.writeIndent(f.depth + 1)
+	}
+	f.children++
+}
+
+// relayoutClose checks an object's keys (keys from f.keys on) for
+// duplicates and writes the container's closing delimiter. It returns
+// false on a duplicate key.
+func (e *encoder) relayoutClose(f *relayoutFrame, keys [][]byte) bool {
+	if f.object {
+		own := keys[f.keys:]
+		if len(own) > 1 {
+			slices.SortFunc(own, bytes.Compare)
+			for i := 1; i < len(own); i++ {
+				if bytes.Equal(own[i-1], own[i]) {
+					return false
+				}
+			}
+		}
+	}
+	if f.children > 0 && f.multiline {
+		if e.opts.trailingComma && !e.opts.strictJSONOutput {
+			e.buf.WriteByte(',')
+		}
+		e.buf.WriteByte('\n')
+		e.writeIndent(f.depth)
+	}
+	if f.object {
+		e.buf.WriteByte('}')
+	} else {
+		e.buf.WriteByte(']')
+	}
+	return true
+}
+
+// relayoutString writes a scanned string as [encoder.writeSourceString]
+// does. It returns false if the string does not unquote, which the
+// scanner already rules out.
+func (e *encoder) relayoutString(raw []byte) bool {
+	if len(raw) > 0 && utf8.Valid(raw) && (!e.opts.escapeHTML || !bytes.ContainsAny(raw, "<>&\u2028\u2029")) {
+		e.buf.Write(raw)
+		return true
+	}
+	value, err := unquoteString(string(raw))
+	if err != nil {
+		return false
+	}
+	e.writeQuotedString(value)
+	return true
+}
+
+// relayoutKeyText returns the unescaped text of a scanned key, as the
+// parser compares keys.
+func relayoutKeyText(raw []byte) ([]byte, bool) {
+	body := raw[1 : len(raw)-1]
+	if bytes.IndexByte(body, '\\') < 0 && utf8.Valid(body) {
+		return body, true
+	}
+	key, err := unquoteString(string(raw))
+	if err != nil {
+		return nil, false
+	}
+	return []byte(key), true
 }
 
 // encodeSlice handles slice values, base64-encoding []byte to match

@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -78,11 +80,16 @@ func (d *decoder) decodeValue(n *node, rv reflect.Value) error {
 	// any other value we walk through pointers, allocating as needed. An
 	// interface holding a non-nil pointer is decoded through that pointer,
 	// as encoding/json does; for null only when the pointer points to
-	// another pointer, which is then set to nil.
+	// another pointer, which is then set to nil. An interface whose
+	// pointer leads back to a pointer already followed (var x any; x = &x)
+	// is decoded into as an interface instead.
+	var followed []uintptr
 	for {
 		if rv.Kind() == reflect.Interface && !rv.IsNil() {
 			if e := rv.Elem(); e.Kind() == reflect.Pointer && !e.IsNil() &&
-				(n.kind != nodeNull || e.Elem().Kind() == reflect.Pointer) {
+				(n.kind != nodeNull || e.Elem().Kind() == reflect.Pointer) &&
+				!slices.Contains(followed, e.Pointer()) {
+				followed = append(followed, e.Pointer())
 				rv = e
 				continue
 			}
@@ -290,38 +297,37 @@ func (d *decoder) decodeNumber(n *node, rv reflect.Value) error {
 	case reflect.Float32, reflect.Float64:
 		f, err := strconv.ParseFloat(s, 64)
 		if err != nil {
-			d.typeErrorf(n, "invalid float %q: %v", s, err)
-			return nil
+			return &OverflowError{Value: s, Type: rv.Type().String(), Pos: n.pos}
 		}
-		if rv.OverflowFloat(f) {
+		// A float32 overflows only from MaxFloat32 plus half its last-place
+		// unit: below that, as for MaxFloat32's shortest text, f rounds
+		// to a finite float32.
+		if rv.Kind() == reflect.Float32 && math.Abs(f) >= math.MaxFloat32+0x1p103 {
 			return &OverflowError{Value: s, Type: rv.Type().String(), Pos: n.pos}
 		}
 		rv.SetFloat(f)
 	case reflect.Interface:
-		d.numberToInterface(n, rv, s, isFloatShaped)
+		return d.numberToInterface(n, rv, s)
 	default:
 		d.numberToBigOrError(n, rv, s, isFloatShaped)
 	}
 	return nil
 }
 
-func (d *decoder) numberToInterface(n *node, rv reflect.Value, s string, isFloatShaped bool) {
+func (d *decoder) numberToInterface(n *node, rv reflect.Value, s string) error {
 	if d.opts.useNumber {
 		rv.Set(reflect.ValueOf(json.Number(s)))
-		return
+		return nil
 	}
 	// Stdlib produces float64 for all numbers in interface{} mode when
-	// UseNumber is off; we match that convention here.
+	// UseNumber is off; we match that convention here. The scanner has
+	// checked the syntax, so ParseFloat fails only past float64's range.
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		if isFloatShaped {
-			d.typeErrorf(n, "invalid float %q: %v", s, err)
-		} else {
-			d.typeErrorf(n, "invalid number %q", s)
-		}
-		return
+		return &OverflowError{Value: s, Type: "float64", Pos: n.pos}
 	}
 	rv.Set(reflect.ValueOf(f))
+	return nil
 }
 
 func (d *decoder) numberToBigOrError(n *node, rv reflect.Value, s string, isFloatShaped bool) {
@@ -650,7 +656,7 @@ func (d *decoder) nodeToInterface(n *node) (any, error) {
 		}
 		f, err := strconv.ParseFloat(n.value, 64)
 		if err != nil {
-			return nil, &SyntaxError{Message: fmt.Sprintf("invalid number %q: %v", n.value, err), Pos: n.pos}
+			return nil, &OverflowError{Value: n.value, Type: "float64", Pos: n.pos}
 		}
 		return f, nil
 	case nodeString:

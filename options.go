@@ -70,7 +70,10 @@ func WithIndentN(n int) EncodeOption {
 
 // WithEscapeHTML controls whether <, > and & in strings are written as
 // \u00XX escapes, and U+2028 and U+2029 as   and  . The default
-// is false; [encoding/json] escapes them by default.
+// is false; [encoding/json] escapes them by default. It applies to
+// strings in marshaler output, json.RawMessage values and [Node] trees as
+// well; a [RawValue] is written verbatim unless strict JSON output
+// re-emits it.
 func WithEscapeHTML(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.escapeHTML = b }
 }

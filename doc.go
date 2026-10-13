@@ -34,6 +34,9 @@
 //     leaving it unchanged.
 //   - A JSON array decoded into a Go array must have exactly the array's
 //     length.
+//   - Marshaler output and json.RawMessage values are written in the
+//     surrounding layout; an object in them with a repeated key keeps
+//     only the last one.
 //
 // # JSONC Extensions
 //

@@ -2162,3 +2162,54 @@ func TestCommentPathBracketsDottedKeys(t *testing.T) {
 		t.Errorf("got\n%s", out)
 	}
 }
+
+func TestRawValueTrailingLineComment(t *testing.T) {
+	type S struct {
+		A RawValue `json:"a"`
+		B int      `json:"b"`
+	}
+	v := S{A: RawValue("  1 /* x */ // note"), B: 2}
+	for _, opts := range [][]EncodeOption{nil, {WithIndent("  ")}} {
+		out, err := MarshalWithOptions(v, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !Valid(out) || !strings.Contains(string(out), `"a": 1,`) {
+			t.Errorf("%q", out)
+		}
+	}
+	out, err := Marshal(S{A: RawValue("\n{\"x\": 1} /* kept */\n"), B: 2})
+	if err != nil || string(out) != `{"a": {"x": 1} /* kept */, "b": 2}` {
+		t.Errorf("block comment: %q, %v", out, err)
+	}
+}
+
+type htmlMarshaler struct{}
+
+func (htmlMarshaler) MarshalJSON() ([]byte, error) { return []byte(`{"<k>":"<b>&amp; "}`), nil }
+
+func TestEscapeHTMLInMarshalerOutput(t *testing.T) {
+	v := map[string]any{"m": htmlMarshaler{}, "r": json.RawMessage(`"<"`)}
+	out, err := MarshalWithOptions(v, WithEscapeHTML(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.ContainsAny(out, "<>&") {
+		t.Errorf("WithEscapeHTML left HTML characters: %s", out)
+	}
+	if out, _ := Marshal(v); !strings.Contains(string(out), `"<b>&amp; "`) {
+		t.Errorf("without WithEscapeHTML the source text is kept: %s", out)
+	}
+}
+
+type bomMarshaler struct{}
+
+func (bomMarshaler) MarshalJSON() ([]byte, error) { return []byte("\xef\xbb\xbf1"), nil }
+
+func TestMarshalerOutputErrors(t *testing.T) {
+	_, err := Marshal(bomMarshaler{})
+	if err == nil || !strings.Contains(err.Error(), "byte order mark") ||
+		!strings.Contains(err.Error(), "within that output") {
+		t.Errorf("err = %v", err)
+	}
+}

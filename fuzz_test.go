@@ -335,3 +335,50 @@ func FuzzMinimize(f *testing.F) {
 		}
 	})
 }
+
+// FuzzRelayout checks that the tree-free re-layout of marshaler output
+// writes exactly what the tree path writes, under every layout option, and
+// writes nothing when it declines.
+func FuzzRelayout(f *testing.F) {
+	addFuzzSeeds(f,
+		`{"a":1,"b":[1,2,{"c":"<&>"}],"d":{}}`,
+		`{"a":1,"a":2}`,
+		`{"\u0061":1,"a":2}`,
+		`[[],[[]],{},{"x":[]}]`,
+		"\"\xff\"",
+		`{"k":"\u2028"}`,
+	)
+	f.Fuzz(func(t *testing.T, data []byte) {
+		for mask := range 64 {
+			opts := &encoderOptions{
+				escapeHTML:       mask&1 != 0,
+				arrayMultiline:   mask&2 != 0,
+				trailingComma:    mask&4 != 0,
+				strictJSONOutput: mask&8 != 0,
+			}
+			if mask&16 != 0 {
+				opts.indent = "  "
+			}
+			strict := mask&32 != 0
+			fast := newNodeEncoder(opts)
+			fast.buf.WriteString("x")
+			ok := fast.relayout(data, strict, 1)
+			if !ok {
+				if fast.buf.String() != "x" {
+					t.Fatalf("declined but wrote %q", fast.buf.String())
+				}
+				continue
+			}
+			n, err := parseEmbedded(data, strict)
+			if err != nil {
+				t.Fatalf("relayout accepted %q (mask %d), parser: %v", data, mask, err)
+			}
+			slow := newNodeEncoder(opts)
+			slow.buf.WriteString("x")
+			slow.writeValue(n, 1)
+			if fast.buf.String() != slow.buf.String() {
+				t.Fatalf("mask %d, input %q:\nrelayout %q\ntree     %q", mask, data, fast.buf.String(), slow.buf.String())
+			}
+		}
+	})
+}

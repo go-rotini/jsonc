@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1573,6 +1574,25 @@ func TestInterfaceHoldingPointer(t *testing.T) {
 	if err := Unmarshal([]byte(`{"A":null}`), &h2); err != nil || h2.A != any(pp) || inner != nil {
 		t.Errorf("null via **T: A = %v, *pp = %v, err = %v", h2.A, *pp, err)
 	}
+
+	// An interface holding a pointer to itself, or a cycle of two, is
+	// decoded into rather than followed forever.
+	var x any
+	x = &x
+	if err := Unmarshal([]byte(`{"a":1}`), &x); err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := x.(map[string]any); !ok || m["a"] != float64(1) {
+		t.Errorf("self pointer: x = %#v", x)
+	}
+	var y, z any
+	y, z = &z, &y
+	if err := Unmarshal([]byte(`2`), &y); err != nil {
+		t.Fatal(err)
+	}
+	if y != any(float64(2)) || z != any(&y) {
+		t.Errorf("two-cycle: y = %#v, z = %#v", y, z)
+	}
 }
 
 type unexportedInt int
@@ -1681,6 +1701,41 @@ func TestFloat32Overflow(t *testing.T) {
 	}
 	if err := Unmarshal([]byte(`{"F":3.4e38}`), &v); err != nil {
 		t.Errorf("max float32: %v", err)
+	}
+	for _, f := range []float32{math.MaxFloat32, -math.MaxFloat32} {
+		out, err := Marshal(struct{ F float32 }{f})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Unmarshal(out, &v); err != nil || v.F != f {
+			t.Errorf("%s: F = %v, err = %v; want %v", out, v.F, err, f)
+		}
+	}
+	edge := strconv.FormatFloat(math.MaxFloat32+0x1p103, 'g', -1, 64)
+	if err := Unmarshal([]byte(`{"F":`+edge+`}`), &v); !errors.As(err, &oe) {
+		t.Errorf("%s: err = %v; want OverflowError", edge, err)
+	}
+}
+
+func TestFloatBeyondFloat64(t *testing.T) {
+	var f struct{ F float64 }
+	var a any
+	var m map[string]any
+	var n struct{ N any }
+	for _, c := range []struct {
+		doc string
+		v   any
+	}{
+		{`{"F": 1e400}`, &f},
+		{`-1e400`, &a},
+		{`{"x": 1e400}`, &m},
+		{`{"N": 1e400}`, &n},
+	} {
+		err := Unmarshal([]byte(c.doc), c.v)
+		var oe *OverflowError
+		if !errors.As(err, &oe) || oe.Pos.Line != 1 || oe.Type != "float64" || strings.Contains(err.Error(), "strconv") {
+			t.Errorf("%s: err = %v, want a positioned float64 OverflowError", c.doc, err)
+		}
 	}
 }
 

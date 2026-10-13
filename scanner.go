@@ -18,6 +18,7 @@ type scanner struct {
 	tok  token // the token produced by the last scanNext
 
 	strictJSON bool // when true, line/block comments are rejected
+	rawOnly    bool // when true, string and number tokens carry no value; read src[tok.pos.Offset:pos]
 }
 
 // stripBOM removes a UTF-8 BOM if present at byte 0 and returns the remaining
@@ -217,7 +218,10 @@ func (s *scanner) scanString() error {
 		switch {
 		case ch == '"':
 			s.advance()
-			value := string(s.src[startPos.Offset:s.pos])
+			var value string
+			if !s.rawOnly {
+				value = string(s.src[startPos.Offset:s.pos])
+			}
 			s.tok = token{
 				kind:  tokenString,
 				value: value,
@@ -364,10 +368,9 @@ func (s *scanner) scanNumber() error {
 		}
 	}
 
-	s.tok = token{
-		kind:  tokenNumber,
-		value: string(s.src[start:s.pos]),
-		pos:   startPos,
+	s.tok = token{kind: tokenNumber, pos: startPos}
+	if !s.rawOnly {
+		s.tok.value = string(s.src[start:s.pos])
 	}
 	return nil
 }

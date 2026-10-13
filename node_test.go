@@ -772,3 +772,40 @@ func TestNodeToBytesKeepsKeys(t *testing.T) {
 		t.Errorf("renamed: got %s, want %s", out, want)
 	}
 }
+
+func TestNodeRawKey(t *testing.T) {
+	f, err := Parse([]byte(`{"a": 1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := f.Root.Children[0]
+	if member.Key != "a" || member.RawKey != `"a"` {
+		t.Fatalf("Key, RawKey = %q, %q", member.Key, member.RawKey)
+	}
+	if out, _ := NodeToBytes(f.Root); string(out) != `{"a": 1}` {
+		t.Errorf("unchanged key: %s", out)
+	}
+	member.Key = "b"
+	if out, _ := NodeToBytes(f.Root); string(out) != `{"b": 1}` {
+		t.Errorf("renamed key: %s", out)
+	}
+
+	// Every field is exported, so a parsed member equals a hand-built one
+	// once its source fields are cleared.
+	g, err := Parse([]byte(`{"a": 1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := g.Root.Children[0]
+	m.Pos, m.RawKey, m.Children[0].Pos, m.Children[0].RawValue = Position{}, "", Position{}, ""
+	want := &Node{Kind: KeyValueNode, Key: "a", Children: []*Node{{Kind: NumberNode, Value: "1"}}}
+	if !reflect.DeepEqual(m, want) {
+		t.Errorf("member = %#v, want %#v", m, want)
+	}
+	nt := reflect.TypeFor[Node]()
+	for i := range nt.NumField() {
+		if !nt.Field(i).IsExported() {
+			t.Errorf("Node.%s is unexported", nt.Field(i).Name)
+		}
+	}
+}
