@@ -1,6 +1,9 @@
 package jsonc
 
-import "fmt"
+import (
+	"fmt"
+	"unicode/utf8"
+)
 
 // nodeKind is the internal AST node kind. The exported [NodeKind] mirrors
 // these values via [exportKind] / [importKind].
@@ -123,7 +126,7 @@ const (
 type Node struct {
 	Kind         NodeKind
 	Key          string       // for KeyValueNode: the unescaped member name (empty otherwise)
-	RawKey       string       // for KeyValueNode: the member name's source text, including quotes and escapes; written in place of Key while it spells Key
+	RawKey       string       // for KeyValueNode: the member name's source text, including quotes and escapes; written in place of Key while it is one valid string token that spells Key
 	Value        string       // for scalar nodes: the unescaped value (numbers keep their source text); for CommentNode: the comment text; empty for containers
 	RawValue     string       // for scalar nodes: the source text, including quotes and escapes; written in preference to Value when set
 	CommentStyle CommentStyle // for CommentNode: which comment style
@@ -333,7 +336,7 @@ func importNode(n *Node) *node {
 		trailComment: n.TrailComment,
 	}
 	if n.RawKey != "" {
-		if key, err := unquoteString(n.RawKey); err == nil && key == n.Key {
+		if key, err := unquoteString(n.RawKey); err == nil && key == n.Key && plainStringToken(n.RawKey) {
 			out.rawKey = n.RawKey
 		}
 	}
@@ -341,6 +344,24 @@ func importNode(n *Node) *node {
 		out.children = append(out.children, importNode(child))
 	}
 	return out
+}
+
+// plainStringToken reports whether raw, a quoted string that unquotes
+// cleanly, is one JSON string token: valid UTF-8 with no unescaped quote
+// or control character between its quotes.
+func plainStringToken(raw string) bool {
+	if !utf8.ValidString(raw) {
+		return false
+	}
+	for i := 1; i < len(raw)-1; i++ {
+		switch c := raw[i]; {
+		case c == '\\':
+			i++
+		case c == '"' || c < 0x20:
+			return false
+		}
+	}
+	return true
 }
 
 func exportKind(k nodeKind) NodeKind {

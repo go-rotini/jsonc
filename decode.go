@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"math/big"
 	"reflect"
 	"slices"
@@ -295,14 +294,11 @@ func (d *decoder) decodeNumber(n *node, rv reflect.Value) error {
 		}
 		rv.SetUint(u)
 	case reflect.Float32, reflect.Float64:
-		f, err := strconv.ParseFloat(s, 64)
+		// Parsing at the target's size rounds once, so text that rounds to
+		// MaxFloat32 decodes. The scanner has checked the syntax, so
+		// ParseFloat fails only past the target's range.
+		f, err := strconv.ParseFloat(s, rv.Type().Bits())
 		if err != nil {
-			return &OverflowError{Value: s, Type: rv.Type().String(), Pos: n.pos}
-		}
-		// A float32 overflows only from MaxFloat32 plus half its last-place
-		// unit: below that, as for MaxFloat32's shortest text, f rounds
-		// to a finite float32.
-		if rv.Kind() == reflect.Float32 && math.Abs(f) >= math.MaxFloat32+0x1p103 {
 			return &OverflowError{Value: s, Type: rv.Type().String(), Pos: n.pos}
 		}
 		rv.SetFloat(f)
@@ -757,6 +753,11 @@ func applyDefault(fi fieldInfo, fv reflect.Value) error {
 		f, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
 			return &DefaultError{Field: fi.name, Message: fmt.Sprintf("invalid float default %q", raw)}
+		}
+		if fv.Kind() == reflect.Float32 {
+			if f, err = strconv.ParseFloat(raw, 32); err != nil {
+				return &DefaultError{Field: fi.name, Message: fmt.Sprintf("default %q overflows %s", raw, fv.Type())}
+			}
 		}
 		fv.SetFloat(f)
 	default:

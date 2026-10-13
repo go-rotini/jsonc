@@ -1711,9 +1711,46 @@ func TestFloat32Overflow(t *testing.T) {
 			t.Errorf("%s: F = %v, err = %v; want %v", out, v.F, err, f)
 		}
 	}
-	edge := strconv.FormatFloat(math.MaxFloat32+0x1p103, 'g', -1, 64)
-	if err := Unmarshal([]byte(`{"F":`+edge+`}`), &v); !errors.As(err, &oe) {
-		t.Errorf("%s: err = %v; want OverflowError", edge, err)
+	// The rounding point is MaxFloat32 plus half a last-place unit:
+	// text from there up overflows, and text below it decodes to
+	// MaxFloat32, even when its nearest float64 is the rounding point.
+	for _, text := range []string{
+		"3.4028236e38",
+		"340282356779733661637539395458142568448",
+		"-3.40282356779733661637539395458142568448e38",
+	} {
+		if err := Unmarshal([]byte(`{"F":`+text+`}`), &v); !errors.As(err, &oe) {
+			t.Errorf("%s: err = %v; want OverflowError", text, err)
+		}
+	}
+	for _, text := range []string{
+		"340282356779733661637539395458142568447",
+		"3.40282356779733661637539395458142568447e38",
+		"3.4028235677973366e38",
+		strconv.FormatFloat(math.Nextafter(math.MaxFloat32+0x1p103, 0), 'g', -1, 64),
+	} {
+		v.F = 0
+		if err := Unmarshal([]byte(`{"F":`+text+`}`), &v); err != nil || v.F != math.MaxFloat32 {
+			t.Errorf("%s: F = %v, err = %v; want MaxFloat32", text, v.F, err)
+		}
+	}
+	// One rounding step: this text is just above the midpoint between 1
+	// and the next float32, so it rounds up, as encoding/json decodes it.
+	if err := Unmarshal([]byte(`{"F":1.0000000596046447753906251}`), &v); err != nil || v.F != math.Nextafter32(1, 2) {
+		t.Errorf("midpoint: F = %v, err = %v; want %v", v.F, err, math.Nextafter32(1, 2))
+	}
+	var d struct {
+		F float32 `jsonc:"f,default=3.4028235677973366e38"`
+	}
+	if err := UnmarshalWithOptions([]byte(`{}`), &d, WithDefaults()); err != nil || d.F != math.MaxFloat32 {
+		t.Errorf("default below the rounding point: F = %v, err = %v", d.F, err)
+	}
+	var o struct {
+		F float32 `jsonc:"f,default=1e300"`
+	}
+	var de *DefaultError
+	if err := UnmarshalWithOptions([]byte(`{}`), &o, WithDefaults()); !errors.As(err, &de) {
+		t.Errorf("default past float32: F = %v, err = %v; want DefaultError", o.F, err)
 	}
 }
 

@@ -790,6 +790,19 @@ func TestNodeRawKey(t *testing.T) {
 		t.Errorf("renamed key: %s", out)
 	}
 
+	// A RawKey that is not one plain string token is dropped, even when it
+	// unquotes to Key.
+	for _, c := range []struct{ key, raw, want string }{
+		{`a": 1, "evil": 2, "b`, `"a": 1, "evil": 2, "b"`, `{"a\": 1, \"evil\": 2, \"b": 1}`},
+		{"a\nb", "\"a\nb\"", `{"a\nb": 1}`},
+		{"x", `"\u0078"`, `{"\u0078": 1}`},
+	} {
+		member.Key, member.RawKey = c.key, c.raw
+		if out, err := NodeToBytes(f.Root); err != nil || string(out) != c.want {
+			t.Errorf("RawKey %q: %s, %v; want %s", c.raw, out, err, c.want)
+		}
+	}
+
 	// Every field is exported, so a parsed member equals a hand-built one
 	// once its source fields are cleared.
 	g, err := Parse([]byte(`{"a": 1}`))
