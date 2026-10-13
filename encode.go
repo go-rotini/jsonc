@@ -13,10 +13,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Marshaler is implemented by types that encode themselves as JSONC. The
-// returned bytes are written verbatim, without validation. A type's
+// returned bytes must hold exactly one JSONC value; the encoder parses
+// them and writes the value in the surrounding output's layout, so
+// indentation and [WithStrictJSONOutput] apply. A type's
 // [encoding/json.Marshaler] implementation is used when it has no
 // MarshalJSONC method.
 type Marshaler interface {
@@ -37,10 +40,12 @@ type encoder struct {
 	opts *encoderOptions
 	buf  bytes.Buffer
 	ctx  context.Context //nolint:containedctx // by design — set via Encoder.EncodeContext
-	// visited tracks the addresses of pointer values currently on the
-	// encoding stack; used to detect cycles. Keyed by reflect.Value pointer
-	// address.
-	visited map[uintptr]bool
+	// visited tracks the pointers currently on the encoding stack, and the
+	// maps and slices once nesting passes cycleCheckDepth; used to detect
+	// cycles.
+	visited map[visitKey]bool
+	// nesting counts the maps and slices currently on the encoding stack.
+	nesting int
 	// path is the current dot-and-bracket path during reflection encoding,
 	// used to look up [Comment] annotations registered via [WithComment].
 	// Each segment is the field/key (".name") or array index ("[N]"); the
@@ -61,8 +66,56 @@ func newReflectEncoder(opts *encoderOptions) *encoder {
 	return &encoder{
 		opts:    opts,
 		ctx:     context.Background(),
-		visited: make(map[uintptr]bool),
+		visited: make(map[visitKey]bool),
 	}
+}
+
+// cycleCheckDepth is the map and slice nesting depth past which the
+// encoder starts checking them for cycles. Shallower values cannot be
+// cyclic without being deeper too, so the check costs nothing for them.
+const cycleCheckDepth = 1000
+
+// visitKey identifies a pointer, map or slice on the encoding stack. A
+// slice is identified by its data pointer and length, so a sub-slice of
+// itself is not mistaken for the same value.
+type visitKey struct {
+	kind reflect.Kind
+	ptr  uintptr
+	len  int
+}
+
+// enterContainer records that the map or slice rv is being encoded. It
+// returns an error if rv is already on the stack (a cycle); otherwise the
+// caller must pass the returned key to [encoder.leaveContainer] when done.
+func (e *encoder) enterContainer(rv reflect.Value) (visitKey, error) {
+	if e.visited == nil {
+		return visitKey{}, nil
+	}
+	e.nesting++
+	if e.nesting <= cycleCheckDepth {
+		return visitKey{}, nil
+	}
+	key := visitKey{kind: rv.Kind(), ptr: rv.Pointer()}
+	if rv.Kind() == reflect.Slice {
+		key.len = rv.Len()
+	}
+	if e.visited[key] {
+		e.nesting--
+		return visitKey{}, fmt.Errorf("%w: cyclic value of type %s", ErrUnsupportedValue, rv.Type())
+	}
+	e.visited[key] = true
+	return key, nil
+}
+
+// leaveContainer undoes [encoder.enterContainer].
+func (e *encoder) leaveContainer(key visitKey) {
+	if e.visited == nil {
+		return
+	}
+	if key.kind != reflect.Invalid {
+		delete(e.visited, key)
+	}
+	e.nesting--
 }
 
 // encodeNode emits the AST rooted at n as JSONC bytes. The output is
@@ -198,7 +251,7 @@ func (e *encoder) writeValue(n *node, depth int) {
 	case nodeArray:
 		e.writeArray(n, depth)
 	case nodeKeyValue:
-		e.writeQuotedString(n.key)
+		e.writeSourceString(n.rawKey, n.key)
 		e.buf.WriteString(": ")
 		if len(n.children) > 0 {
 			e.writeValue(n.children[0], depth)
@@ -206,11 +259,7 @@ func (e *encoder) writeValue(n *node, depth int) {
 			e.buf.WriteString("null")
 		}
 	case nodeString:
-		if n.rawValue != "" {
-			e.buf.WriteString(n.rawValue)
-		} else {
-			e.writeQuotedString(n.value)
-		}
+		e.writeSourceString(n.rawValue, n.value)
 	case nodeNumber, nodeBool, nodeNull:
 		if n.rawValue != "" {
 			e.buf.WriteString(n.rawValue)
@@ -222,6 +271,16 @@ func (e *encoder) writeValue(n *node, depth int) {
 			e.writeOrphanComment(n, depth)
 		}
 	}
+}
+
+// writeSourceString writes a string from its source text raw when it has
+// one that is valid UTF-8, and otherwise quotes value.
+func (e *encoder) writeSourceString(raw, value string) {
+	if raw != "" && utf8.ValidString(raw) {
+		e.buf.WriteString(raw)
+		return
+	}
+	e.writeQuotedString(value)
 }
 
 // writeObject emits an object container. It dispatches to a multi-line or
@@ -322,9 +381,15 @@ func (e *encoder) writeIndent(depth int) {
 // given depth, one // comment per line. A space follows the // unless the
 // line is empty or already starts with one, and trailing blanks are
 // dropped. Line endings (\r, \r\n, \n) are normalized so embedded CRs do
-// not prematurely terminate the // comment scope.
+// not prematurely terminate the // comment scope. Leading blank lines are
+// dropped, as the parser drops them when it reads the output back.
 func (e *encoder) writeCommentBlock(text string, depth int) {
+	started := false
 	for line := range strings.SplitSeq(normalizeLineEndings(text), "\n") {
+		if !started && strings.TrimSpace(line) == "" {
+			continue
+		}
+		started = true
 		e.writeIndent(depth)
 		e.writeLineCommentText(line)
 		e.buf.WriteByte('\n')
@@ -451,12 +516,22 @@ func (e *encoder) writeQuotedString(s string) {
 				e.buf.WriteByte(c)
 			}
 		default:
-			if c < 0x20 {
+			switch {
+			case c < 0x20:
 				e.buf.WriteString(`\u00`)
 				e.buf.WriteByte(hexDigit(c >> 4))
 				e.buf.WriteByte(hexDigit(c & 0xF))
-			} else {
+			case c < utf8.RuneSelf:
 				e.buf.WriteByte(c)
+			default:
+				// Invalid UTF-8 is written as U+FFFD, as in encoding/json.
+				r, size := utf8.DecodeRuneInString(s[i:])
+				if r == utf8.RuneError && size == 1 {
+					e.buf.WriteString(`�`)
+					continue
+				}
+				e.buf.WriteString(s[i : i+size])
+				i += size - 1
 			}
 		}
 	}
@@ -477,9 +552,14 @@ func (e *encoder) multiline() bool {
 	return e.opts.indent != ""
 }
 
-// pushPathKey appends an object-member segment (".name") to the encoding
-// path stack used by [WithComment] lookups.
+// pushPathKey appends an object-member segment to the encoding path stack
+// used by [WithComment] lookups: ".name", or `["name"]` when name contains
+// "." or "[", so it cannot be confused with a nested path.
 func (e *encoder) pushPathKey(name string) {
+	if strings.ContainsAny(name, ".[") {
+		e.path = append(e.path, `["`+name+`"]`)
+		return
+	}
 	e.path = append(e.path, "."+name)
 }
 
@@ -562,15 +642,15 @@ func (e *encoder) encodeValue(rv reflect.Value, depth int) error {
 	// Special-cased types take priority over the marshaler interfaces:
 	// a raw-bytes / raw-number / base64 path preserves the source form,
 	// whereas the interface dispatch would re-encode through the user code.
-	if handled, err := e.encodeSpecialType(rv); handled {
+	if handled, err := e.encodeSpecialType(rv, depth); handled {
 		return err
 	}
 
-	if handled, err := e.encodeCustomMarshaler(rv); handled {
+	if handled, err := e.encodeCustomMarshaler(rv, depth); handled {
 		return err
 	}
 
-	if handled, err := e.encodeMarshaler(rv); handled {
+	if handled, err := e.encodeMarshaler(rv, depth); handled {
 		return err
 	}
 
@@ -620,13 +700,13 @@ func (e *encoder) encodePointer(rv reflect.Value, depth int) error {
 		e.buf.WriteString("null")
 		return nil
 	}
-	addr := rv.Pointer()
-	if e.visited != nil && e.visited[addr] {
+	key := visitKey{kind: reflect.Pointer, ptr: rv.Pointer()}
+	if e.visited != nil && e.visited[key] {
 		return fmt.Errorf("%w: cyclic value of type %s", ErrUnsupportedValue, rv.Type())
 	}
 	if e.visited != nil {
-		e.visited[addr] = true
-		defer delete(e.visited, addr)
+		e.visited[key] = true
+		defer delete(e.visited, key)
 	}
 	return e.encodeValue(rv.Elem(), depth)
 }
@@ -670,7 +750,7 @@ func (e *encoder) encodeFloat(rv reflect.Value) error {
 // encodeSpecialType handles types whose source form must be preserved
 // verbatim. Returns (handled, err). When handled is true, err is the result
 // of writing the value (or nil on success).
-func (e *encoder) encodeSpecialType(rv reflect.Value) (bool, error) {
+func (e *encoder) encodeSpecialType(rv reflect.Value, depth int) (bool, error) {
 	switch rv.Type() {
 	case reflect.TypeFor[RawValue]():
 		raw := rv.Bytes()
@@ -678,37 +758,37 @@ func (e *encoder) encodeSpecialType(rv reflect.Value) (bool, error) {
 			e.buf.WriteString("null")
 			return true, nil
 		}
-		// In strict-JSON-output mode we must round-trip the bytes through
-		// the parser to drop comments and trailing commas; otherwise the
-		// raw value is passed through verbatim.
-		if e.opts.strictJSONOutput {
-			out, err := ToJSON(raw)
-			if err != nil {
-				return true, err
+		// The bytes must be one JSONC value. In strict-JSON-output mode the
+		// parsed value is re-emitted to drop comments and trailing commas;
+		// otherwise the source text is written verbatim.
+		if !e.opts.strictJSONOutput {
+			if _, err := parseEmbedded(raw, false); err != nil {
+				return true, fmt.Errorf("jsonc: invalid RawValue: %w", err)
 			}
-			e.buf.Write(out)
+			e.buf.Write(raw)
 			return true, nil
 		}
-		e.buf.Write(raw)
-		return true, nil
+		return true, e.writeEmbedded(raw, false, depth, "RawValue")
 	case reflect.TypeFor[json.RawMessage]():
 		raw := rv.Bytes()
 		if len(raw) == 0 {
 			e.buf.WriteString("null")
 			return true, nil
 		}
-		e.buf.Write(raw)
-		return true, nil
+		return true, e.writeEmbedded(raw, true, depth, "json.RawMessage")
 	case reflect.TypeFor[json.Number]():
 		s := rv.String()
 		if s == "" {
 			e.buf.WriteString("0")
 			return true, nil
 		}
+		if !isNumberText(s) {
+			return true, fmt.Errorf("%w: invalid number literal %q", ErrUnsupportedValue, s)
+		}
 		e.buf.WriteString(s)
 		return true, nil
 	case reflect.TypeFor[time.Time]():
-		t, ok := rv.Interface().(time.Time)
+		t, ok := reflect.TypeAssert[time.Time](rv)
 		if !ok {
 			return false, nil
 		}
@@ -727,7 +807,7 @@ func (e *encoder) encodeSpecialType(rv reflect.Value) (bool, error) {
 		}
 		return true, nil
 	case reflect.TypeFor[big.Int]():
-		bi, ok := rv.Interface().(big.Int)
+		bi, ok := reflect.TypeAssert[big.Int](rv)
 		if !ok {
 			return false, nil
 		}
@@ -738,7 +818,7 @@ func (e *encoder) encodeSpecialType(rv reflect.Value) (bool, error) {
 			e.buf.WriteString("null")
 			return true, nil
 		}
-		bi, ok := rv.Interface().(*big.Int)
+		bi, ok := reflect.TypeAssert[*big.Int](rv)
 		if !ok || bi == nil {
 			e.buf.WriteString("null")
 			return true, nil
@@ -746,7 +826,7 @@ func (e *encoder) encodeSpecialType(rv reflect.Value) (bool, error) {
 		e.buf.WriteString(bi.String())
 		return true, nil
 	case reflect.TypeFor[big.Float]():
-		bf, ok := rv.Interface().(big.Float)
+		bf, ok := reflect.TypeAssert[big.Float](rv)
 		if !ok {
 			return false, nil
 		}
@@ -757,7 +837,7 @@ func (e *encoder) encodeSpecialType(rv reflect.Value) (bool, error) {
 			e.buf.WriteString("null")
 			return true, nil
 		}
-		bf, ok := rv.Interface().(*big.Float)
+		bf, ok := reflect.TypeAssert[*big.Float](rv)
 		if !ok || bf == nil {
 			e.buf.WriteString("null")
 			return true, nil
@@ -765,18 +845,23 @@ func (e *encoder) encodeSpecialType(rv reflect.Value) (bool, error) {
 		e.buf.WriteString(bf.Text('g', -1))
 		return true, nil
 	case reflect.TypeFor[MapSlice]():
-		ms, ok := rv.Interface().(MapSlice)
+		ms, ok := reflect.TypeAssert[MapSlice](rv)
 		if !ok {
 			return false, nil
 		}
-		return true, e.encodeMapSlice(ms, 0)
+		key, err := e.enterContainer(rv)
+		if err != nil {
+			return true, err
+		}
+		defer e.leaveContainer(key)
+		return true, e.encodeMapSlice(ms, depth)
 	}
 	return false, nil
 }
 
 // encodeCustomMarshaler invokes a user-registered marshaler for rv's type,
-// if one exists. The result bytes are passed through verbatim.
-func (e *encoder) encodeCustomMarshaler(rv reflect.Value) (bool, error) {
+// if one exists, and writes its output with [encoder.writeEmbedded].
+func (e *encoder) encodeCustomMarshaler(rv reflect.Value, depth int) (bool, error) {
 	if e.opts.customMarshalers == nil {
 		return false, nil
 	}
@@ -786,38 +871,42 @@ func (e *encoder) encodeCustomMarshaler(rv reflect.Value) (bool, error) {
 	}
 	result := reflect.ValueOf(fn).Call([]reflect.Value{rv})
 	if !result[1].IsNil() {
-		err, ok := result[1].Interface().(error)
+		err, ok := reflect.TypeAssert[error](result[1])
 		if ok {
 			return true, err
 		}
 	}
-	out, ok := result[0].Interface().([]byte)
+	out, ok := reflect.TypeAssert[[]byte](result[0])
 	if !ok {
 		return true, fmt.Errorf("%w: custom marshaler for %s did not return []byte", ErrUnsupportedValue, rv.Type())
 	}
-	e.buf.Write(out)
-	return true, nil
+	return true, e.writeEmbedded(out, false, depth, "custom marshaler for "+rv.Type().String())
 }
 
 // encodeMarshaler dispatches to user-defined marshaler interfaces in
 // priority order: MarshalerContext, Marshaler, json.Marshaler,
 // TextMarshaler. Pointer-receiver methods are tried first because the
 // pointer method set is a superset of the value method set.
-func (e *encoder) encodeMarshaler(rv reflect.Value) (bool, error) {
+func (e *encoder) encodeMarshaler(rv reflect.Value, depth int) (bool, error) {
 	if rv.CanAddr() {
-		if handled, err := e.encodeMarshalerForValue(rv.Addr()); handled {
+		if handled, err := e.encodeMarshalerForValue(rv.Addr(), depth); handled {
 			return true, err
 		}
 	}
 	if rv.CanInterface() {
-		return e.encodeMarshalerForValue(rv)
+		return e.encodeMarshalerForValue(rv, depth)
 	}
 	return false, nil
 }
 
-// encodeMarshalerForValue tries each marshaler interface against rv.
-func (e *encoder) encodeMarshalerForValue(rv reflect.Value) (bool, error) {
-	if !rv.CanInterface() {
+// encodeMarshalerForValue tries each marshaler interface against rv. A nil
+// pointer is never passed to a method; [encoder.encodePointer] writes null
+// for it, as encoding/json does.
+func (e *encoder) encodeMarshalerForValue(rv reflect.Value, depth int) (bool, error) {
+	if !rv.CanInterface() || rv.Kind() == reflect.Interface {
+		return false, nil
+	}
+	if rv.Kind() == reflect.Pointer && rv.IsNil() {
 		return false, nil
 	}
 	iface := rv.Interface()
@@ -827,24 +916,21 @@ func (e *encoder) encodeMarshalerForValue(rv reflect.Value) (bool, error) {
 		if err != nil {
 			return true, err
 		}
-		e.buf.Write(out)
-		return true, nil
+		return true, e.writeEmbedded(out, false, depth, "MarshalJSONC for "+rv.Type().String())
 	}
 	if m, ok := iface.(Marshaler); ok {
 		out, err := m.MarshalJSONC()
 		if err != nil {
 			return true, err
 		}
-		e.buf.Write(out)
-		return true, nil
+		return true, e.writeEmbedded(out, false, depth, "MarshalJSONC for "+rv.Type().String())
 	}
 	if m, ok := iface.(json.Marshaler); ok {
 		out, err := m.MarshalJSON()
 		if err != nil {
 			return true, err
 		}
-		e.buf.Write(out)
-		return true, nil
+		return true, e.writeEmbedded(out, true, depth, "MarshalJSON for "+rv.Type().String())
 	}
 	if m, ok := iface.(encoding.TextMarshaler); ok {
 		text, err := m.MarshalText()
@@ -855,6 +941,31 @@ func (e *encoder) encodeMarshalerForValue(rv reflect.Value) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// embeddedMaxDepth bounds the nesting of marshaler output, as
+// encoding/json does.
+const embeddedMaxDepth = 10000
+
+// parseEmbedded parses the output of a marshaler or a raw value, which
+// must be exactly one value: strict RFC 8259 JSON when strictJSON is set,
+// otherwise JSONC. Duplicate keys are allowed, as encoding/json allows
+// them in such output; the last one wins.
+func parseEmbedded(data []byte, strictJSON bool) (*node, error) {
+	opts := &decoderOptions{strictJSON: strictJSON, allowDuplicateKeys: true, maxDepth: embeddedMaxDepth}
+	return newParser(data, opts).parse()
+}
+
+// writeEmbedded validates data with [parseEmbedded] and writes the value at
+// depth in the encoder's layout, so indentation and strict JSON output
+// apply. what names the source in the error.
+func (e *encoder) writeEmbedded(data []byte, strictJSON bool, depth int, what string) error {
+	n, err := parseEmbedded(data, strictJSON)
+	if err != nil {
+		return fmt.Errorf("jsonc: invalid output from %s: %w", what, err)
+	}
+	e.writeValue(n, depth)
+	return nil
 }
 
 // encodeSlice handles slice values, base64-encoding []byte to match
@@ -868,6 +979,11 @@ func (e *encoder) encodeSlice(rv reflect.Value, depth int) error {
 		e.writeBase64(rv.Bytes())
 		return nil
 	}
+	key, err := e.enterContainer(rv)
+	if err != nil {
+		return err
+	}
+	defer e.leaveContainer(key)
 	return e.encodeListLike(rv, depth)
 }
 
@@ -1007,6 +1123,11 @@ func (e *encoder) encodeMap(rv reflect.Value, depth int) error {
 		e.buf.WriteString("{}")
 		return nil
 	}
+	key, err := e.enterContainer(rv)
+	if err != nil {
+		return err
+	}
+	defer e.leaveContainer(key)
 
 	pairs := make([]mapKV, len(keys))
 	for i, k := range keys {
@@ -1164,7 +1285,7 @@ func (e *encoder) encodeMapSlice(ms MapSlice, depth int) error {
 // JSON object key.
 func mapKeyString(k reflect.Value) (string, error) {
 	if k.CanInterface() {
-		if tm, ok := k.Interface().(encoding.TextMarshaler); ok {
+		if tm, ok := reflect.TypeAssert[encoding.TextMarshaler](k); ok {
 			text, err := tm.MarshalText()
 			if err != nil {
 				return "", err
@@ -1344,6 +1465,12 @@ func (e *encoder) encodeStruct(rv reflect.Value, depth int) error {
 
 // encodeFieldValue handles per-field options such as `,string`.
 func (e *encoder) encodeFieldValue(fi fieldInfo, fv reflect.Value, depth int) error {
+	// As in encoding/json, `,string` also applies through an unnamed
+	// pointer; a nil pointer is written as null.
+	if fi.asString && fv.Kind() == reflect.Pointer && fv.Type().Name() == "" && !fv.IsNil() &&
+		isStringEncodable(fv.Elem()) {
+		fv = fv.Elem()
+	}
 	if fi.asString && isStringEncodable(fv) {
 		// Two-pass approach: encode the primitive into the buffer, snapshot
 		// the bytes, truncate, and re-emit as a JSON-quoted string. Avoids
@@ -1383,11 +1510,11 @@ func isZeroField(fv reflect.Value) bool {
 		}
 	}
 	if fv.CanInterface() {
-		if z, ok := fv.Interface().(interface{ IsZero() bool }); ok {
+		if z, ok := reflect.TypeAssert[interface{ IsZero() bool }](fv); ok {
 			return z.IsZero()
 		}
 		if fv.CanAddr() {
-			if z, ok := fv.Addr().Interface().(interface{ IsZero() bool }); ok {
+			if z, ok := reflect.TypeAssert[interface{ IsZero() bool }](fv.Addr()); ok {
 				return z.IsZero()
 			}
 		}
@@ -1433,6 +1560,15 @@ func isEmptyValue(rv reflect.Value) bool {
 		return rv.IsNil()
 	}
 	return false
+}
+
+// isNumberText reports whether s is a JSON number.
+func isNumberText(s string) bool {
+	if s == "" || (s[0] != '-' && !isDigit(s[0])) {
+		return false
+	}
+	sc := &scanner{src: []byte(s), line: 1, col: 1}
+	return sc.scanNumber() == nil && sc.atEnd()
 }
 
 // isStringEncodable reports whether rv is a primitive that can be wrapped

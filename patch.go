@@ -27,13 +27,14 @@ type Patch []PatchOp
 
 // ParsePatch decodes data, a JSONC array of operation objects, into a
 // [Patch]. Comments and trailing commas are accepted, and comments inside
-// an operation's value are kept on its AST. Operation names are not checked
-// until [Patch.Apply]. Errors wrap [ErrPatchSyntax].
+// an operation's value are kept on its AST. Every operation must have a
+// "path", and "move" and "copy" a "from"; other operation names are not
+// checked until [Patch.Apply]. Errors wrap [ErrPatchSyntax].
 func ParsePatch(data []byte) (Patch, error) {
 	type rawOp struct {
 		Op    string   `json:"op"`
-		Path  string   `json:"path"`
-		From  string   `json:"from,omitempty"`
+		Path  *string  `json:"path"`
+		From  *string  `json:"from,omitempty"`
 		Value RawValue `json:"value,omitempty"`
 	}
 	var ops []rawOp
@@ -42,7 +43,15 @@ func ParsePatch(data []byte) (Patch, error) {
 	}
 	out := make(Patch, len(ops))
 	for i, op := range ops {
-		out[i] = PatchOp{Op: op.Op, Path: op.Path, From: op.From}
+		if op.Path == nil {
+			return nil, fmt.Errorf("%w: op[%d] has no path", ErrPatchSyntax, i)
+		}
+		out[i] = PatchOp{Op: op.Op, Path: *op.Path}
+		if op.From != nil {
+			out[i].From = *op.From
+		} else if op.Op == "move" || op.Op == "copy" {
+			return nil, fmt.Errorf("%w: op[%d] %s has no from", ErrPatchSyntax, i, op.Op)
+		}
 		if len(op.Value) > 0 {
 			f, err := Parse(op.Value)
 			if err != nil {
@@ -102,7 +111,11 @@ func pointerTokens(ptr string) ([]string, error) {
 	raw := strings.Split(ptr[1:], "/")
 	out := make([]string, len(raw))
 	for i, t := range raw {
-		out[i] = decodePointerToken(t)
+		tok, err := decodePointerToken(t)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = tok
 	}
 	return out, nil
 }
@@ -118,19 +131,21 @@ func resolveParent(root *Node, tokens []string) (*Node, string, error) {
 	if len(tokens) == 0 {
 		return nil, "", errResolveRoot
 	}
-	cur := root
-	for _, t := range tokens[:len(tokens)-1] {
-		next, err := descend(cur, t)
-		if err != nil {
-			return nil, "", err
-		}
-		cur = next
+	cur, err := resolveTarget(root, tokens[:len(tokens)-1])
+	if err != nil {
+		return nil, "", err
+	}
+	if cur == nil {
+		return nil, "", fmt.Errorf("%w: no document", ErrPathNotFound)
 	}
 	return cur, tokens[len(tokens)-1], nil
 }
 
 // descend follows one token from n.
 func descend(n *Node, tok string) (*Node, error) {
+	if n == nil {
+		return nil, fmt.Errorf("%w: no document", ErrPathNotFound)
+	}
 	switch n.Kind {
 	case ObjectNode:
 		for _, c := range n.Children {
@@ -140,8 +155,8 @@ func descend(n *Node, tok string) (*Node, error) {
 		}
 		return nil, fmt.Errorf("%w: member %q", ErrPathNotFound, tok)
 	case ArrayNode:
-		i, err := strconv.Atoi(tok)
-		if err != nil || i < 0 || i >= len(n.Children) {
+		i := parseArrayIndex(tok)
+		if i < 0 || i >= len(n.Children) {
 			return nil, fmt.Errorf("%w: index %q", ErrPathNotFound, tok)
 		}
 		return n.Children[i], nil
@@ -207,8 +222,8 @@ func opAdd(root *Node, path string, value *Node) (*Node, error) {
 			parent.Children = append(parent.Children, cloneNode(value))
 			return root, nil
 		}
-		i, err := strconv.Atoi(last)
-		if err != nil || i < 0 || i > len(parent.Children) {
+		i := parseArrayIndex(last)
+		if i < 0 || i > len(parent.Children) {
 			return nil, fmt.Errorf("%w: array index %q", ErrPointerSyntax, last)
 		}
 		parent.Children = append(parent.Children, nil)
@@ -243,8 +258,8 @@ func opRemove(root *Node, path string) (*Node, error) {
 		}
 		return nil, fmt.Errorf("%w: member %q", ErrPathNotFound, last)
 	case ArrayNode:
-		i, err := strconv.Atoi(last)
-		if err != nil || i < 0 || i >= len(parent.Children) {
+		i := parseArrayIndex(last)
+		if i < 0 || i >= len(parent.Children) {
 			return nil, fmt.Errorf("%w: array index %q", ErrPointerSyntax, last)
 		}
 		parent.Children = append(parent.Children[:i], parent.Children[i+1:]...)
@@ -254,8 +269,9 @@ func opRemove(root *Node, path string) (*Node, error) {
 	}
 }
 
-// opReplace implements "replace" — equivalent to remove+add but the target
-// must exist.
+// opReplace implements "replace": the target must exist, and its value is
+// overwritten in place. A replaced array element keeps its comments when
+// value has none.
 func opReplace(root *Node, path string, value *Node) (*Node, error) {
 	if value == nil {
 		return nil, fmt.Errorf("%w: replace requires value", ErrPatchSyntax)
@@ -267,22 +283,42 @@ func opReplace(root *Node, path string, value *Node) (*Node, error) {
 	if len(tokens) == 0 {
 		return cloneNode(value), nil
 	}
-	// Replace differs from add only in requiring the target to exist;
-	// confirm it does, then defer to add for the actual write.
-	if _, err := resolveTarget(root, tokens); err != nil {
+	parent, last, err := resolveParent(root, tokens)
+	if err != nil {
 		return nil, err
 	}
-	return opAdd(root, path, value)
+	switch parent.Kind {
+	case ObjectNode:
+		if kv := memberNode(parent, last); kv != nil {
+			kv.Children = []*Node{cloneNode(value)}
+			return root, nil
+		}
+		return nil, fmt.Errorf("%w: member %q", ErrPathNotFound, last)
+	case ArrayNode:
+		i := parseArrayIndex(last)
+		if i < 0 || i >= len(parent.Children) {
+			return nil, fmt.Errorf("%w: index %q", ErrPathNotFound, last)
+		}
+		parent.Children[i] = replacementNode(parent.Children[i], value)
+		return root, nil
+	default:
+		return nil, fmt.Errorf("%w: cannot descend into %s", ErrPathNotFound, parent.Kind)
+	}
 }
 
-// opMove removes from `from` and adds at `path`.
+// memberNode returns obj's KeyValueNode named key, or nil.
+func memberNode(obj *Node, key string) *Node {
+	for _, c := range obj.Children {
+		if c.Kind == KeyValueNode && c.Key == key {
+			return c
+		}
+	}
+	return nil
+}
+
+// opMove removes from `from` and adds at `path`. A member moved to another
+// member keeps its comments.
 func opMove(root *Node, from, path string) (*Node, error) {
-	if from == path {
-		return root, nil
-	}
-	if strings.HasPrefix(path, from+"/") {
-		return nil, fmt.Errorf("%w: cannot move into descendant", ErrPatchSyntax)
-	}
 	tokens, err := pointerTokens(from)
 	if err != nil {
 		return nil, err
@@ -291,12 +327,35 @@ func opMove(root *Node, from, path string) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	dstTokens, err := pointerTokens(path)
+	if err != nil {
+		return nil, err
+	}
+	if from == path {
+		return root, nil
+	}
+	if strings.HasPrefix(path, from+"/") {
+		return nil, fmt.Errorf("%w: cannot move into descendant", ErrPatchSyntax)
+	}
+	var srcMember *Node
+	if parent, last, err := resolveParent(root, tokens); err == nil && parent.Kind == ObjectNode {
+		srcMember = memberNode(parent, last)
+	}
 	moved := cloneNode(val)
 	root, err = opRemove(root, from)
 	if err != nil {
 		return nil, err
 	}
-	return opAdd(root, path, moved)
+	root, err = opAdd(root, path, moved)
+	if err != nil || srcMember == nil {
+		return root, err
+	}
+	if parent, last, err := resolveParent(root, dstTokens); err == nil && parent.Kind == ObjectNode {
+		if dst := memberNode(parent, last); dst != nil && !hasComments(dst) {
+			dst.HeadComment, dst.Comment, dst.FootComment = srcMember.HeadComment, srcMember.Comment, srcMember.FootComment
+		}
+	}
+	return root, nil
 }
 
 // opCopy clones the node at `from` and adds it at `path`.

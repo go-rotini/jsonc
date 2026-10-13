@@ -37,13 +37,17 @@ func MarshalTo[T any](v T, opts ...EncodeOption) ([]byte, error) {
 }
 
 // EncodeFile encodes v as JSONC and writes the result to the given file
-// path. The file is created (or truncated) with mode 0o644.
+// path. A new file is created with mode 0600, because configuration files
+// often hold secrets; an existing file is truncated and keeps its mode.
+// The write is not atomic: a failure part-way can leave a partial file.
+// For an atomic replace, marshal with [MarshalWithOptions] and write with
+// github.com/go-rotini/fs.
 func EncodeFile(path string, v any, opts ...EncodeOption) error {
 	out, err := MarshalWithOptions(v, opts...)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, out, 0o644); err != nil { //nolint:gosec // user-controlled path; mode chosen for config files
+	if err := os.WriteFile(path, out, 0o600); err != nil {
 		return fmt.Errorf("jsonc: %w", err)
 	}
 	return nil

@@ -749,3 +749,26 @@ func TestBuiltTrailComment(t *testing.T) {
 		t.Errorf("got:\n%s\nwant:\n%s", out, want)
 	}
 }
+
+func TestNodeToBytesKeepsKeys(t *testing.T) {
+	f, err := Parse([]byte(`{"café": 1, "\ud800": 2, "a\/b": "x\/y"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NodeToBytes(f.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"café": 1, "\ud800": 2, "a\/b": "x\/y"}`; string(out) != want {
+		t.Errorf("got %s, want %s", out, want)
+	}
+
+	f.Root.Children[2].Key = "c/d"
+	out, err = NodeToBytes(cloneNode(f.Root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"café": 1, "\ud800": 2, "c/d": "x\/y"}`; string(out) != want {
+		t.Errorf("renamed: got %s, want %s", out, want)
+	}
+}

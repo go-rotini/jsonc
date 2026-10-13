@@ -104,7 +104,8 @@ func WithDurationAsString(b bool) EncodeOption {
 // WithStrictJSONOutput ensures the encoded output is valid RFC 8259 JSON:
 // comments (from [WithComment], "comment" tags or AST nodes) are dropped,
 // trailing commas are not written regardless of [WithTrailingComma], and
-// [RawValue] fields are converted with [ToJSON]. It is the encode-side
+// [RawValue] fields and [Marshaler] output are converted as [ToJSON] does.
+// It is the encode-side
 // counterpart of [WithStrictJSON].
 func WithStrictJSONOutput(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.strictJSONOutput = b }
@@ -124,6 +125,8 @@ func WithMapKeyOrder(order MapKeyOrder) EncodeOption {
 // Path syntax mirrors the encoder's own path construction:
 //   - Object members use dot notation: "server.port".
 //   - Map entries use the string form of the key: "users.alice".
+//   - A member name or key containing "." or "[" is written in brackets:
+//     `hosts["example.com"]`.
 //   - Array elements use bracket-with-index: "tags[0]" or "items[3].name".
 //
 // Comments are emitted only when output is multi-line (indent is set) and
@@ -135,7 +138,8 @@ func WithComment(comments map[string][]Comment) EncodeOption {
 }
 
 // WithCustomMarshaler registers a function that encodes values of type T
-// to JSONC bytes, which are written verbatim. It takes precedence over the
+// to JSONC bytes, which must hold exactly one JSONC value; the value is
+// written in the surrounding output's layout. It takes precedence over the
 // [Marshaler], [MarshalerContext], [encoding/json.Marshaler] and
 // [encoding.TextMarshaler] interfaces, but not over the built-in handling
 // of [RawValue], [encoding/json.RawMessage], [Number], [MapSlice],
@@ -227,9 +231,14 @@ func WithDefaults() DecodeOption {
 	return func(o *decoderOptions) { o.applyDefaults = true }
 }
 
-// WithMaxDepth limits the nesting depth of the parsed value (default 100).
-// Deeper documents are rejected with a [SyntaxError]. Zero or a negative n
-// means no limit.
+// WithMaxDepth limits how deeply objects and arrays may nest (default
+// 100); a scalar inside them does not add a level. Deeper documents are
+// rejected with a [SyntaxError]. Zero or a negative n means no limit, which
+// also removes the protection against deep input: parsing and decoding
+// recurse once per level, so a few megabytes of untrusted input such as
+// "[[[[..." can then exhaust the goroutine stack and crash the process
+// with an unrecoverable fatal error. For large trusted documents prefer a
+// large finite limit.
 func WithMaxDepth(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxDepth = n }
 }
@@ -241,7 +250,9 @@ func WithMaxKeys(n int) DecodeOption {
 }
 
 // WithMaxDocumentSize rejects input longer than n bytes with
-// [ErrDocumentSize] before parsing begins. Zero means no limit.
+// [ErrDocumentSize] before parsing begins. A [Decoder] reads at most n+1
+// bytes and fails when its whole input is longer than n. Zero means no
+// limit.
 func WithMaxDocumentSize(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxDocumentSize = n }
 }

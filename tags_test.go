@@ -205,8 +205,8 @@ func TestStructFieldsEmbeddedNamedWins(t *testing.T) {
 }
 
 func TestStructFieldsConflictAtSameDepth(t *testing.T) {
-	// Two embedded structs whose fields collide at the same depth produce
-	// a conflict entry. We use the jsonc tag (rather than json) for the
+	// Two embedded structs whose fields collide at the same depth drop
+	// the name. We use the jsonc tag (rather than json) for the
 	// collision so go vet's structtag check (which only inspects the json
 	// tag for sibling duplicates) does not flag the test source.
 	type A struct {
@@ -220,8 +220,8 @@ func TestStructFieldsConflictAtSameDepth(t *testing.T) {
 		B
 	}
 	sf := getStructFields(reflect.TypeOf(Outer{}))
-	if len(sf.conflicts) != 1 || sf.conflicts[0] != "x" {
-		t.Errorf("conflicts = %v, want [x]", sf.conflicts)
+	if _, ok := sf.byName["x"]; ok || len(sf.fields) != 0 {
+		t.Errorf("fields = %v, want none", sf.fields)
 	}
 }
 
@@ -291,5 +291,58 @@ func TestStructFieldsLayeredOptions(t *testing.T) {
 	}
 	if !fi.required {
 		t.Error("required not picked up")
+	}
+}
+
+type conflictA struct{ X int }
+
+type conflictB struct{ X int }
+
+type conflictTagged struct {
+	Y int `json:"X"`
+}
+
+type selfEmbedding struct {
+	*selfEmbedding
+	Name string
+}
+
+func TestFieldConflict(t *testing.T) {
+	both := struct {
+		conflictA
+		conflictB
+	}{conflictA{1}, conflictB{2}}
+	got, err := Marshal(both)
+	if err != nil || string(got) != `{}` {
+		t.Errorf("untagged clash: got %s, %v; want {}", got, err)
+	}
+
+	tagged := struct {
+		conflictA
+		conflictTagged
+	}{conflictA{1}, conflictTagged{2}}
+	got, err = Marshal(tagged)
+	if err != nil || string(got) != `{"X": 2}` {
+		t.Errorf("tagged wins: got %s, %v", got, err)
+	}
+
+	var dec struct {
+		conflictA
+		conflictB
+	}
+	if err := Unmarshal([]byte(`{"X":5}`), &dec); err != nil || dec.conflictA.X != 0 || dec.conflictB.X != 0 {
+		t.Errorf("decode clash: %+v, %v", dec, err)
+	}
+}
+
+func TestSelfEmbeddingStruct(t *testing.T) {
+	sf := getStructFields(reflect.TypeFor[selfEmbedding]())
+	if len(sf.fields) != 1 || sf.fields[0].name != "Name" {
+		t.Errorf("fields = %+v", sf.fields)
+	}
+	v := selfEmbedding{Name: "outer"}
+	v.selfEmbedding = &selfEmbedding{Name: "inner"}
+	if got, err := Marshal(v); err != nil || string(got) != `{"Name": "outer"}` {
+		t.Errorf("Marshal = %s, %v", got, err)
 	}
 }

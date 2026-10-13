@@ -5,33 +5,19 @@ import (
 	"fmt"
 )
 
-// scanner converts JSONC source bytes into a slice of tokens. It is
-// single-pass and produces position-annotated tokens preserving comment text.
-// When strictJSON is true, the scanner reports comments as a [StrictJSONError];
-// trailing commas are detected by the parser, not the scanner.
+// scanner converts JSONC source bytes into tokens, one at a time on demand,
+// so the parser's limits stop the work before the rest of the input is
+// read. Tokens carry their position and keep comment text. When strictJSON
+// is true, the scanner reports comments as a [StrictJSONError]; trailing
+// commas are detected by the parser, not the scanner.
 type scanner struct {
-	src    []byte
-	pos    int // byte offset in src
-	line   int // 1-indexed line number
-	col    int // 1-indexed column on the current line
-	tokens []token
+	src  []byte
+	pos  int   // byte offset in src
+	line int   // 1-indexed line number
+	col  int   // 1-indexed column on the current line
+	tok  token // the token produced by the last scanNext
 
 	strictJSON bool // when true, line/block comments are rejected
-}
-
-// newScanner returns a scanner ready to tokenize src. It strips a UTF-8 BOM
-// at byte 0 and rejects non-UTF-8 BOMs (UTF-16/UTF-32) with a clear
-// [SyntaxError] directing the caller to transcode first.
-func newScanner(src []byte) (*scanner, error) {
-	src, err := stripBOM(src)
-	if err != nil {
-		return nil, err
-	}
-	return &scanner{
-		src:  src,
-		line: 1,
-		col:  1,
-	}, nil
 }
 
 // stripBOM removes a UTF-8 BOM if present at byte 0 and returns the remaining
@@ -53,25 +39,27 @@ func stripBOM(src []byte) ([]byte, error) {
 	return src, nil
 }
 
-// scan tokenizes the entire input. It returns the collected token slice or the
-// first error encountered.
-func (s *scanner) scan() ([]token, error) {
-	s.emit(tokenStreamStart, "")
-	for !s.atEnd() {
-		if err := s.scanNext(); err != nil {
-			return nil, err
-		}
+// next skips spaces and tabs and returns the next token, or a tokenEOF at
+// the end of the input. On error it returns a tokenError positioned at the
+// start of the bad token, with the error.
+func (s *scanner) next() (token, error) {
+	for !s.atEnd() && (s.src[s.pos] == ' ' || s.src[s.pos] == '\t') {
+		s.advance()
 	}
-	s.emit(tokenEOF, "")
-	s.emit(tokenStreamEnd, "")
-	return s.tokens, nil
+	if s.atEnd() {
+		return token{kind: tokenEOF, pos: s.position()}, nil
+	}
+	start := s.position()
+	if err := s.scanNext(); err != nil {
+		return token{kind: tokenError, pos: start}, err
+	}
+	return s.tok, nil
 }
 
+// scanNext scans one token, which must start at the current byte, into s.tok.
 func (s *scanner) scanNext() error {
 	ch := s.peek()
 	switch {
-	case ch == ' ' || ch == '\t':
-		s.advance()
 	case ch == '\r':
 		// CR, CRLF, and bare LF all yield a single tokenNewline.
 		s.advance()
@@ -153,11 +141,11 @@ func (s *scanner) scanLineComment(startPos Position) error {
 	text := string(s.src[textStart:s.pos])
 	// Leave the line terminator for the main scan loop, which will emit a
 	// tokenNewline for it.
-	s.tokens = append(s.tokens, token{
+	s.tok = token{
 		kind:  tokenLineComment,
 		value: text,
 		pos:   startPos,
-	})
+	}
 	return nil
 }
 
@@ -184,11 +172,11 @@ func (s *scanner) scanBlockComment(startPos Position) error {
 			}
 			s.advance()
 			s.advance()
-			s.tokens = append(s.tokens, token{
+			s.tok = token{
 				kind:  tokenBlockComment,
 				value: text,
 				pos:   startPos,
-			})
+			}
 			return nil
 		}
 		// Normalize CR / CRLF to LF in stored comment text. The buffered slow
@@ -230,11 +218,11 @@ func (s *scanner) scanString() error {
 		case ch == '"':
 			s.advance()
 			value := string(s.src[startPos.Offset:s.pos])
-			s.tokens = append(s.tokens, token{
+			s.tok = token{
 				kind:  tokenString,
 				value: value,
 				pos:   startPos,
-			})
+			}
 			return nil
 		case ch == '\\':
 			if err := s.scanEscape(); err != nil {
@@ -376,11 +364,11 @@ func (s *scanner) scanNumber() error {
 		}
 	}
 
-	s.tokens = append(s.tokens, token{
+	s.tok = token{
 		kind:  tokenNumber,
 		value: string(s.src[start:s.pos]),
 		pos:   startPos,
-	})
+	}
 	return nil
 }
 
@@ -406,21 +394,21 @@ func (s *scanner) scanLiteralWord(word string, kind tokenKind) error {
 	for range word {
 		s.advance()
 	}
-	s.tokens = append(s.tokens, token{
+	s.tok = token{
 		kind:  kind,
 		value: word,
 		pos:   startPos,
-	})
+	}
 	return nil
 }
 
 // emit appends a token at the current position (without advancing).
 func (s *scanner) emit(kind tokenKind, value string) {
-	s.tokens = append(s.tokens, token{
+	s.tok = token{
 		kind:  kind,
 		value: value,
 		pos:   s.position(),
-	})
+	}
 }
 
 // emitAdvance appends a single-byte token and advances past it.
@@ -500,6 +488,6 @@ func isDigit(c byte) bool {
 // duplicate keys and nesting deeper than 100 levels are not. To validate
 // strict RFC 8259 JSON, call [Parse] with [WithStrictJSON].
 func Valid(data []byte) bool {
-	_, err := Parse(data)
+	_, err := parseDocument(data, defaultDecodeOptions())
 	return err == nil
 }

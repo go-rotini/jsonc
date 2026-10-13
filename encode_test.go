@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/big"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -552,7 +553,7 @@ func TestEncodeRawMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(out) != `{"x":1}` {
+	if string(out) != `{"x": 1}` {
 		t.Errorf("got %q", out)
 	}
 }
@@ -613,6 +614,66 @@ func TestEncodeStdlibMarshaler(t *testing.T) {
 	}
 	if string(out) != `"std:y"` {
 		t.Errorf("got %q", out)
+	}
+}
+
+type rawJSON string
+
+func (r rawJSON) MarshalJSON() ([]byte, error) { return []byte(r), nil }
+
+type rawJSONC string
+
+func (r rawJSONC) MarshalJSONC() ([]byte, error) { return []byte(r), nil }
+
+func TestMarshalerOutputValidated(t *testing.T) {
+	bad := []struct {
+		name string
+		v    any
+		opts []EncodeOption
+	}{
+		{"RawMessage unterminated", json.RawMessage(`{bad`), nil},
+		{"RawMessage two values", json.RawMessage(`1 2`), nil},
+		{"RawMessage comment", json.RawMessage(`1 // c`), nil},
+		{"MarshalJSON injection", map[string]rawJSON{"x": `"a"}, "admin": true, "y": {"z"`}, nil},
+		{"MarshalJSON injection strict", map[string]rawJSON{"x": `"a"}, "admin": true, "y": {"z"`}, []EncodeOption{WithStrictJSONOutput(true)}},
+		{"MarshalJSON empty", rawJSON(""), nil},
+		{"MarshalJSON trailing comma", rawJSON(`[1,]`), nil},
+		{"MarshalJSONC two values", rawJSONC(`1 2`), nil},
+		{"RawValue unterminated", RawValue(`{"a":`), nil},
+		{"custom marshaler", 1, []EncodeOption{WithCustomMarshaler(func(int) ([]byte, error) { return []byte(`}`), nil })}},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := MarshalWithOptions(tt.v, tt.opts...)
+			if err == nil {
+				t.Fatalf("got %s, want error", out)
+			}
+		})
+	}
+
+	good := []struct {
+		name string
+		v    any
+		opts []EncodeOption
+		want string
+	}{
+		{"MarshalJSON re-indented", struct{ A rawJSON }{`{"b":[1,2]}`}, []EncodeOption{WithIndent("  ")},
+			"{\n  \"A\": {\n    \"b\": [\n      1,\n      2\n    ]\n  }\n}"},
+		{"MarshalJSONC comment kept", struct{ A rawJSONC }{"{\"b\": 1, // c\n}"}, []EncodeOption{WithIndent("  ")},
+			"{\n  \"A\": {\n    \"b\": 1 // c\n  }\n}"},
+		{"MarshalJSONC strict output", struct{ A rawJSONC }{"[1, /* c */ 2,]"}, []EncodeOption{WithStrictJSONOutput(true)},
+			`{"A": [1, 2]}`},
+		{"RawValue verbatim", struct{ A RawValue }{RawValue("[1, /* c */ 2,]")}, nil,
+			`{"A": [1, /* c */ 2,]}`},
+		{"number text kept", rawJSON(`1.50e+2`), nil, `1.50e+2`},
+	}
+	for _, tt := range good {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := MarshalWithOptions(tt.v, tt.opts...)
+			if err != nil || string(out) != tt.want {
+				t.Errorf("got %q, %v; want %q", out, err, tt.want)
+			}
+		})
 	}
 }
 
@@ -1955,5 +2016,149 @@ func TestRoundTripArrayOfStructs(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].Name != "a" || got[1].Tags[1] != 4 {
 		t.Errorf("round trip: %+v", got)
+	}
+}
+
+type valueMarshaler struct{ N int }
+
+func (v valueMarshaler) MarshalJSON() ([]byte, error) { return []byte(strconv.Itoa(v.N)), nil }
+
+type readingMarshaler struct{ N int }
+
+func (m *readingMarshaler) MarshalJSON() ([]byte, error) { return []byte(strconv.Itoa(m.N)), nil }
+
+type nilPtrMarshaler struct{}
+
+func (p *nilPtrMarshaler) MarshalJSONC() ([]byte, error) {
+	if p == nil {
+		return []byte(`"nil receiver"`), nil
+	}
+	return []byte(`"set"`), nil
+}
+
+func TestNilPtrMarshaler(t *testing.T) {
+	var vr *valueMarshaler
+	tests := []struct {
+		name string
+		v    any
+		want string
+	}{
+		{"nil *time.Time field", struct{ T *time.Time }{}, `{"T": null}`},
+		{"nil value-receiver pointer", struct{ V *valueMarshaler }{}, `{"V": null}`},
+		{"nil value-receiver in any", struct{ V any }{vr}, `{"V": null}`},
+		{"nil pointer receiver is not called", struct{ P *nilPtrMarshaler }{}, `{"P": null}`},
+		{"nil *regexp.Regexp field", struct{ M *regexp.Regexp }{}, `{"M": null}`},
+		{"nil reading pointer receiver", struct{ M *readingMarshaler }{}, `{"M": null}`},
+		{"nil map value", map[string]*readingMarshaler{"a": nil}, `{"a": null}`},
+		{"nil slice element", []*readingMarshaler{nil, {N: 2}}, `[null, 2]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Marshal(tt.v)
+			if err != nil || string(got) != tt.want {
+				t.Errorf("got %s, %v; want %s", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestUnexportedEmbeddedEncode(t *testing.T) {
+	v := struct {
+		unexportedInt
+		A int
+	}{5, 1}
+	got, err := Marshal(v)
+	if err != nil || string(got) != `{"A": 1}` {
+		t.Errorf("got %s, %v", got, err)
+	}
+}
+
+func TestMarshalCyclicMapAndSlice(t *testing.T) {
+	m := map[string]any{}
+	m["self"] = m
+	if _, err := Marshal(m); !errors.Is(err, ErrUnsupportedValue) {
+		t.Errorf("map: err = %v, want ErrUnsupportedValue", err)
+	}
+	s := []any{nil}
+	s[0] = s
+	if _, err := Marshal(s); !errors.Is(err, ErrUnsupportedValue) {
+		t.Errorf("slice: err = %v, want ErrUnsupportedValue", err)
+	}
+	ms := MapSlice{{Key: "a"}}
+	ms[0].Value = ms
+	if _, err := Marshal(ms); !errors.Is(err, ErrUnsupportedValue) {
+		t.Errorf("MapSlice: err = %v, want ErrUnsupportedValue", err)
+	}
+	// Deep but acyclic nesting still encodes.
+	var deep any = "x"
+	for range 1500 {
+		deep = []any{deep}
+	}
+	if _, err := Marshal(deep); err != nil {
+		t.Errorf("deep acyclic: %v", err)
+	}
+}
+
+func TestNestedMapSliceIndent(t *testing.T) {
+	v := map[string]any{"outer": map[string]any{"ms": MapSlice{{Key: "a", Value: 1}, {Key: "b", Value: map[string]int{"c": 2}}}}}
+	got, err := MarshalIndent(v, "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{
+  "outer": {
+    "ms": {
+      "a": 1,
+      "b": {
+        "c": 2
+      }
+    }
+  }
+}`
+	if string(got) != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestMarshalInvalidUTF8(t *testing.T) {
+	got, err := Marshal("a\xffb")
+	if err != nil || string(got) != `"a�b"` {
+		t.Errorf("got %s, %v", got, err)
+	}
+	got, err = Marshal("é€😀")
+	if err != nil || string(got) != `"é€😀"` {
+		t.Errorf("valid multi-byte: got %s, %v", got, err)
+	}
+}
+
+func TestMarshalInvalidNumber(t *testing.T) {
+	for _, n := range []json.Number{"abc", "01", "1.", "+1", "1e"} {
+		if got, err := Marshal(n); !errors.Is(err, ErrUnsupportedValue) {
+			t.Errorf("Marshal(%q) = %s, %v; want ErrUnsupportedValue", n, got, err)
+		}
+	}
+	for _, n := range []json.Number{"0", "-1.5e10", "123"} {
+		if got, err := Marshal(n); err != nil || string(got) != string(n) {
+			t.Errorf("Marshal(%q) = %s, %v", n, got, err)
+		}
+	}
+}
+
+func TestCommentPathBracketsDottedKeys(t *testing.T) {
+	v := map[string]any{
+		"a.b": 1,
+		"a":   map[string]int{"b": 2},
+	}
+	got, err := MarshalWithOptions(v, WithIndent("  "), WithComment(map[string][]Comment{
+		`["a.b"]`: {{Position: LineCommentPos, Text: "dotted"}},
+		"a.b":     {{Position: LineCommentPos, Text: "nested"}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(got)
+	if !strings.Contains(out, `"a.b": 1 // dotted`) || !strings.Contains(out, `"b": 2 // nested`) ||
+		strings.Count(out, "//") != 2 {
+		t.Errorf("got\n%s", out)
 	}
 }

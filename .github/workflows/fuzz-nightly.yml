@@ -1,0 +1,62 @@
+# The parser's fuzz targets for ten minutes each, every night. Pushes run every fuzz target for
+# 60 seconds (make test-fuzz); this longer run reaches inputs a short one doesn't. A failing
+# input is kept as an artifact: put it under testdata/fuzz/<target>/ to reproduce it with go test.
+name: Nightly fuzz
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Lists the fuzz targets from the test files, so a new or renamed target joins the nightly run
+  # without editing this file.
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+
+      - name: List fuzz targets
+        id: list
+        run: |
+          names=$(go test -list '^Fuzz' . | grep '^Fuzz')
+          echo "list=$(echo "$names" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    needs: targets
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.list) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+
+      - name: Fuzz for 10 minutes
+        run: go test -run='^$' -fuzz="^${TARGET}\$" -fuzztime=10m .
+
+      - name: Keep the failing input
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: testdata/fuzz/${{ matrix.target }}/
+          if-no-files-found: ignore

@@ -75,9 +75,26 @@ func (d *decoder) decode(root *node, v any) error {
 // based on the target reflect.Value's kind and any unmarshaler interfaces.
 func (d *decoder) decodeValue(n *node, rv reflect.Value) error {
 	// JSON null terminates at the outermost pointer (sets it to nil); for
-	// any other value we walk through pointers, allocating as needed.
-	for rv.Kind() == reflect.Pointer {
+	// any other value we walk through pointers, allocating as needed. An
+	// interface holding a non-nil pointer is decoded through that pointer,
+	// as encoding/json does; for null only when the pointer points to
+	// another pointer, which is then set to nil.
+	for {
+		if rv.Kind() == reflect.Interface && !rv.IsNil() {
+			if e := rv.Elem(); e.Kind() == reflect.Pointer && !e.IsNil() &&
+				(n.kind != nodeNull || e.Elem().Kind() == reflect.Pointer) {
+				rv = e
+				continue
+			}
+		}
+		if rv.Kind() != reflect.Pointer {
+			break
+		}
 		if n.kind == nodeNull {
+			if !rv.CanSet() {
+				rv = rv.Elem()
+				continue
+			}
 			if !rv.IsNil() {
 				rv.Set(reflect.Zero(rv.Type()))
 			}
@@ -103,7 +120,7 @@ func (d *decoder) decodeValue(n *node, rv reflect.Value) error {
 			ptr := reflect.New(rv.Type())
 			result := reflect.ValueOf(fn).Call([]reflect.Value{ptr, reflect.ValueOf(raw)})
 			if !result[0].IsNil() {
-				if err, ok := result[0].Interface().(error); ok {
+				if err, ok := reflect.TypeAssert[error](result[0]); ok {
 					return err
 				}
 			}
@@ -116,6 +133,13 @@ func (d *decoder) decodeValue(n *node, rv reflect.Value) error {
 		if handled, err := d.decodeViaInterface(n, rv); handled {
 			return err
 		}
+	}
+
+	// Only an empty interface can hold a decoded value of any type; a value
+	// cannot be chosen for an interface with methods.
+	if rv.Kind() == reflect.Interface && rv.NumMethod() > 0 && n.kind != nodeNull {
+		d.typeErrorf(n, "cannot decode %s into %s", nodeKindName(n.kind), rv.Type())
+		return nil
 	}
 
 	switch n.kind {
@@ -269,6 +293,9 @@ func (d *decoder) decodeNumber(n *node, rv reflect.Value) error {
 			d.typeErrorf(n, "invalid float %q: %v", s, err)
 			return nil
 		}
+		if rv.OverflowFloat(f) {
+			return &OverflowError{Value: s, Type: rv.Type().String(), Pos: n.pos}
+		}
 		rv.SetFloat(f)
 	case reflect.Interface:
 		d.numberToInterface(n, rv, s, isFloatShaped)
@@ -283,26 +310,18 @@ func (d *decoder) numberToInterface(n *node, rv reflect.Value, s string, isFloat
 		rv.Set(reflect.ValueOf(json.Number(s)))
 		return
 	}
-	if isFloatShaped {
-		f, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			d.typeErrorf(n, "invalid float %q: %v", s, err)
-			return
-		}
-		rv.Set(reflect.ValueOf(f))
-		return
-	}
 	// Stdlib produces float64 for all numbers in interface{} mode when
 	// UseNumber is off; we match that convention here.
-	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
-		rv.Set(reflect.ValueOf(float64(i)))
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		if isFloatShaped {
+			d.typeErrorf(n, "invalid float %q: %v", s, err)
+		} else {
+			d.typeErrorf(n, "invalid number %q", s)
+		}
 		return
 	}
-	if f, err := strconv.ParseFloat(s, 64); err == nil {
-		rv.Set(reflect.ValueOf(f))
-		return
-	}
-	d.typeErrorf(n, "invalid number %q", s)
+	rv.Set(reflect.ValueOf(f))
 }
 
 func (d *decoder) numberToBigOrError(n *node, rv reflect.Value, s string, isFloatShaped bool) {
@@ -442,7 +461,6 @@ func (d *decoder) decodeObjectToStruct(n *node, rv reflect.Value) error {
 			continue
 		}
 		key := child.key
-		assigned[key] = true
 
 		idx, ok := sf.byName[key]
 		if !ok {
@@ -456,13 +474,14 @@ func (d *decoder) decodeObjectToStruct(n *node, rv reflect.Value) error {
 		}
 
 		fi := sf.fields[idx]
-		fv := fieldByIndexAlloc(rv, fi.index)
-
-		// "Key present with explicit null" satisfies `required` — the
-		// presence check above (assigned[key] = true) runs before the null
-		// is decoded, so a required field with a null value is accepted.
-		valueChild := child.children[0]
-		if err := d.decodeValue(valueChild, fv); err != nil {
+		// Presence is recorded under the field's name, whatever the key's
+		// case. A key present with an explicit null satisfies `required`.
+		assigned[fi.name] = true
+		fv, err := fieldByIndexAlloc(rv, fi.index)
+		if err != nil {
+			return err
+		}
+		if err := d.decodeField(fi, child.children[0], fv); err != nil {
 			return err
 		}
 	}
@@ -479,7 +498,10 @@ func (d *decoder) decodeObjectToStruct(n *node, rv reflect.Value) error {
 			}
 		}
 		if fi.hasDefault && d.opts.applyDefaults {
-			fv := fieldByIndexAlloc(rv, fi.index)
+			fv, err := fieldByIndexAlloc(rv, fi.index)
+			if err != nil {
+				return err
+			}
 			if err := applyDefault(fi, fv); err != nil {
 				if de, ok := errors.AsType[*DefaultError](err); ok {
 					de.Pos = n.pos
@@ -501,6 +523,68 @@ func (d *decoder) decodeObjectToStruct(n *node, rv reflect.Value) error {
 		}
 	}
 	return nil
+}
+
+// decodeField decodes n into the struct field fv. For a `,string` field of
+// a scalar type (or an unnamed pointer to one), a string value holds the
+// field's JSON text, as in encoding/json: exactly one RFC 8259 scalar, with
+// no surrounding space or comments. A string that does not hold one, and
+// any other value, decodes as usual; so a string field keeps text such as
+// "null" or "abc" as it is.
+func (d *decoder) decodeField(fi fieldInfo, n *node, fv reflect.Value) error {
+	if !fi.asString || n.kind != nodeString || !isQuotableType(fv.Type()) {
+		return d.decodeValue(n, fv)
+	}
+	inner, err := parseQuotedScalar(n.value)
+	if err != nil || (derefUnnamed(fv.Type()).Kind() == reflect.String && inner.kind != nodeString) {
+		return d.decodeValue(n, fv)
+	}
+	inner.pos = n.pos
+	return d.decodeValue(inner, fv)
+}
+
+// parseQuotedScalar parses the text of a `,string` field: one strict JSON
+// scalar spanning the whole text.
+func parseQuotedScalar(text string) (*node, error) {
+	if text == "" || isJSONSpace(text[0]) || isJSONSpace(text[len(text)-1]) {
+		return nil, ErrSyntax
+	}
+	n, err := newParser([]byte(text), &decoderOptions{strictJSON: true, maxDepth: 1}).parse()
+	if err != nil {
+		return nil, err
+	}
+	if n.kind == nodeObject || n.kind == nodeArray {
+		return nil, ErrSyntax
+	}
+	return n, nil
+}
+
+// isJSONSpace reports whether c is RFC 8259 whitespace.
+func isJSONSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// isQuotableType reports whether the `,string` tag option applies to t: a
+// bool, number or string, or an unnamed pointer to one.
+func isQuotableType(t reflect.Type) bool {
+	switch derefUnnamed(t).Kind() {
+	case reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64,
+		reflect.String:
+		return true
+	}
+	return false
+}
+
+// derefUnnamed returns t's element type if t is an unnamed pointer type,
+// else t.
+func derefUnnamed(t reflect.Type) reflect.Type {
+	if t.Kind() == reflect.Pointer && t.Name() == "" {
+		return t.Elem()
+	}
+	return t
 }
 
 func (d *decoder) decodeObjectToMap(n *node, rv reflect.Value) error {
@@ -689,12 +773,17 @@ func caseInsensitiveLookup(sf *structFields, key string) int {
 
 // fieldByIndexAlloc returns the addressable reflect.Value of a struct field
 // (resolving an index path), allocating intermediate pointer-to-struct fields
-// on demand.
-func fieldByIndexAlloc(rv reflect.Value, index []int) reflect.Value {
+// on demand. A nil embedded pointer to an unexported struct type cannot be
+// allocated, so it returns an error, as encoding/json does.
+func fieldByIndexAlloc(rv reflect.Value, index []int) (reflect.Value, error) {
 	for i, idx := range index {
 		if i > 0 {
 			if rv.Kind() == reflect.Pointer {
 				if rv.IsNil() {
+					if !rv.CanSet() {
+						return reflect.Value{}, fmt.Errorf("%w: cannot set embedded pointer to unexported struct %s",
+							ErrUnsupportedValue, rv.Type().Elem())
+					}
 					rv.Set(reflect.New(rv.Type().Elem()))
 				}
 				rv = rv.Elem()
@@ -702,7 +791,7 @@ func fieldByIndexAlloc(rv reflect.Value, index []int) reflect.Value {
 		}
 		rv = rv.Field(idx)
 	}
-	return rv
+	return rv, nil
 }
 
 // canDecodeMapKey reports whether a Go map key type is decodable from a
@@ -733,7 +822,7 @@ func buildMapKey(keyType reflect.Type, key string) (reflect.Value, error) {
 	}
 	if reflect.PointerTo(keyType).Implements(reflect.TypeFor[encoding.TextUnmarshaler]()) {
 		v := reflect.New(keyType)
-		tu, ok := v.Interface().(encoding.TextUnmarshaler)
+		tu, ok := reflect.TypeAssert[encoding.TextUnmarshaler](v)
 		if !ok {
 			return reflect.Value{}, fmt.Errorf("%w: %s", errUnsupportedMapKey, keyType)
 		}

@@ -48,6 +48,7 @@ const (
 type node struct {
 	kind        nodeKind
 	key         string
+	rawKey      string // for nodeKeyValue from the parser: the key's source text, with quotes
 	value       string
 	rawValue    string
 	style       commentStyle
@@ -121,7 +122,7 @@ const (
 // delimiters; stacked comments are joined with newlines.
 type Node struct {
 	Kind         NodeKind
-	Key          string       // for KeyValueNode: the unescaped member name (empty otherwise)
+	Key          string       // for KeyValueNode: the unescaped member name (empty otherwise); written with its source spelling while unchanged
 	Value        string       // for scalar nodes: the unescaped value (numbers keep their source text); for CommentNode: the comment text; empty for containers
 	RawValue     string       // for scalar nodes: the source text, including quotes and escapes; written in preference to Value when set
 	CommentStyle CommentStyle // for CommentNode: which comment style
@@ -131,6 +132,11 @@ type Node struct {
 	HeadComment  string       // comments on the lines before this node
 	FootComment  string       // comments after this node: for a container, before its closing delimiter; for a member or element, before the following comma
 	TrailComment string       // comments on the lines after this node, past its closing delimiter and comma; the parser sets it only on the root
+
+	// rawKey is a KeyValueNode's key as written in the source, and
+	// rawKeyOf the Key it spells; the writer uses rawKey while Key is
+	// unchanged.
+	rawKey, rawKeyOf string
 }
 
 // String returns a concise human-readable representation. For scalars, the
@@ -255,25 +261,14 @@ func Parse(data []byte, opts ...DecodeOption) (*File, error) {
 		return nil, ErrDocumentSize
 	}
 
-	s, err := newScanner(data)
-	if err != nil {
-		return nil, err
-	}
-	s.strictJSON = o.strictJSON
-	tokens, err := s.scan()
-	if err != nil {
-		return nil, err
-	}
-
-	p := newParser(tokens, o).withData(data)
-	root, err := p.parse()
+	root, warnings, err := parseDocumentWarnings(data, o)
 	if err != nil {
 		return nil, err
 	}
 
 	return &File{
 		Root:     exportNode(root),
-		Warnings: p.warnings,
+		Warnings: warnings,
 	}, nil
 }
 
@@ -315,6 +310,8 @@ func exportNode(n *node) *Node {
 		HeadComment:  n.headComment,
 		FootComment:  n.footComment,
 		TrailComment: n.trailComment,
+		rawKey:       n.rawKey,
+		rawKeyOf:     n.key,
 	}
 	for _, child := range n.children {
 		out.Children = append(out.Children, exportNode(child))
@@ -339,6 +336,9 @@ func importNode(n *Node) *node {
 		headComment:  n.HeadComment,
 		footComment:  n.FootComment,
 		trailComment: n.TrailComment,
+	}
+	if n.rawKey != "" && n.Key == n.rawKeyOf {
+		out.rawKey = n.rawKey
 	}
 	for _, child := range n.Children {
 		out.children = append(out.children, importNode(child))

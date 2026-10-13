@@ -21,6 +21,7 @@ type fieldInfo struct {
 	defaultValue string
 	hasDefault   bool
 	comment      string
+	tagged       bool // the name comes from a tag
 }
 
 // parseTagPair parses both the json and jsonc tag values for a single
@@ -96,12 +97,11 @@ func splitTag(tag string) (name string, opts []string) {
 
 // structFields holds the parsed metadata for a struct type, used by both
 // encoder and decoder. byName maps field names (case-sensitive) to indices
-// into fields. conflicts records duplicate field names at the same depth
-// (these fields are treated as if they don't exist, matching encoding/json).
+// into fields. Names that several fields share at the same depth have no
+// entry, matching encoding/json.
 type structFields struct {
-	fields    []fieldInfo
-	byName    map[string]int
-	conflicts []string
+	fields []fieldInfo
+	byName map[string]int
 }
 
 // structFieldCache memoizes structFields lookups by reflect.Type. It is
@@ -118,20 +118,87 @@ func getStructFields(t reflect.Type) *structFields {
 	sf := &structFields{
 		byName: make(map[string]int),
 	}
-	collectFields(t, nil, sf)
+	collectFields(t, sf)
 	structFieldCache.Store(t, sf)
 	return sf
 }
 
 // collectFields walks a struct type (recursively for embedded structs) and
-// populates sf with field metadata. The traversal order matches
-// encoding/json: outer fields before inner, declaration order preserved
-// per level. Anonymous (embedded) struct fields are inlined unless they
-// have an explicit tag name.
-func collectFields(t reflect.Type, index []int, sf *structFields) {
+// populates sf with field metadata, following encoding/json: fields are
+// ordered by their position in the struct, embedded structs without a tag
+// name are inlined, and of several fields with the same name the
+// shallowest wins. Several at the same shallowest depth are all dropped,
+// unless exactly one of them is named by a tag, which then wins.
+func collectFields(t reflect.Type, sf *structFields) {
+	var all []fieldInfo
+	collectCandidates(t, nil, map[reflect.Type]bool{t: true}, &all)
+
+	// Group by name, keeping the first-seen order of names.
+	groups := make(map[string][]int)
+	var names []string
+	for i, fi := range all {
+		if _, ok := groups[fi.name]; !ok {
+			names = append(names, fi.name)
+		}
+		groups[fi.name] = append(groups[fi.name], i)
+	}
+	keep := make([]bool, len(all))
+	for _, name := range names {
+		if winner, ok := dominantField(all, groups[name]); ok {
+			keep[winner] = true
+		}
+	}
+	for i, fi := range all {
+		if keep[i] {
+			sf.fields = append(sf.fields, fi)
+			sf.byName[fi.name] = len(sf.fields) - 1
+		}
+	}
+}
+
+// dominantField returns the index in all of the field that wins among the
+// same-named candidates idx, or false if none does.
+func dominantField(all []fieldInfo, idx []int) (int, bool) {
+	minDepth := len(all[idx[0]].index)
+	for _, i := range idx[1:] {
+		minDepth = min(minDepth, len(all[i].index))
+	}
+	winner, count, tagged := -1, 0, 0
+	for _, i := range idx {
+		if len(all[i].index) != minDepth {
+			continue
+		}
+		count++
+		if all[i].tagged {
+			tagged++
+			winner = i
+		} else if count == 1 {
+			winner = i
+		}
+	}
+	switch {
+	case count == 1:
+		return winner, true
+	case tagged == 1:
+		return winner, true
+	default:
+		return -1, false
+	}
+}
+
+// collectCandidates appends every field of t, inlining embedded structs,
+// in struct order. onPath holds the struct types being walked, so a type
+// that embeds itself is not walked again.
+func collectCandidates(t reflect.Type, index []int, onPath map[reflect.Type]bool, out *[]fieldInfo) {
 	for i := range t.NumField() {
 		f := t.Field(i)
-		if !f.IsExported() && !f.Anonymous {
+		ft := f.Type
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		if !f.IsExported() && (!f.Anonymous || ft.Kind() != reflect.Struct) {
+			// Unexported fields are ignored, except embedded structs, whose
+			// exported fields are promoted.
 			continue
 		}
 
@@ -139,6 +206,7 @@ func collectFields(t reflect.Type, index []int, sf *structFields) {
 		if fi.skip {
 			continue
 		}
+		fi.tagged = fi.name != ""
 
 		if commentTag := f.Tag.Get("comment"); commentTag != "" {
 			fi.comment = commentTag
@@ -148,17 +216,21 @@ func collectFields(t reflect.Type, index []int, sf *structFields) {
 		copy(fi.index, index)
 		fi.index[len(index)] = i
 
-		// Anonymous (embedded) struct fields with no explicit name are
-		// inlined into the parent. This matches encoding/json behavior.
-		if f.Anonymous && fi.name == "" {
-			ft := f.Type
-			if ft.Kind() == reflect.Pointer {
-				ft = ft.Elem()
+		if !f.IsExported() && fi.name != "" {
+			// A named unexported embedded struct is a field that cannot be
+			// set or read.
+			continue
+		}
+
+		// Embedded structs with no explicit name are inlined into the
+		// parent.
+		if f.Anonymous && ft.Kind() == reflect.Struct && fi.name == "" {
+			if !onPath[ft] {
+				onPath[ft] = true
+				collectCandidates(ft, fi.index, onPath, out)
+				delete(onPath, ft)
 			}
-			if ft.Kind() == reflect.Struct {
-				collectFields(ft, fi.index, sf)
-				continue
-			}
+			continue
 		}
 
 		// No name yet — use the Go field name verbatim (matches stdlib
@@ -166,21 +238,6 @@ func collectFields(t reflect.Type, index []int, sf *structFields) {
 		if fi.name == "" {
 			fi.name = f.Name
 		}
-
-		if idx, exists := sf.byName[fi.name]; exists {
-			existing := sf.fields[idx]
-			switch {
-			case len(fi.index) == len(existing.index):
-				// Same depth — both lose, mark as conflict.
-				sf.conflicts = append(sf.conflicts, fi.name)
-			case len(fi.index) < len(existing.index):
-				// Shallower wins.
-				sf.fields[idx] = fi
-			}
-			continue
-		}
-
-		sf.fields = append(sf.fields, fi)
-		sf.byName[fi.name] = len(sf.fields) - 1
+		*out = append(*out, fi)
 	}
 }

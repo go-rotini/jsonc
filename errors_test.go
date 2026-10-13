@@ -403,7 +403,7 @@ func TestFormatErrorWithoutPos(t *testing.T) {
 	}
 }
 
-// FormatError at column 1 — repeatByte(' ', 0) returns "".
+// FormatError at column 1 puts the caret at the start of the line.
 func TestFormatErrorAtFirstColumn(t *testing.T) {
 	src := []byte(`@`)
 	_, err := Parse(src)
@@ -411,8 +411,51 @@ func TestFormatErrorAtFirstColumn(t *testing.T) {
 		t.Skip("expected parse error")
 	}
 	out := FormatError(src, err)
-	// Position with column 1 → repeatByte(' ', 0) returns "".
+	// Column 1 needs no caret padding.
 	if !strings.Contains(out, "@") {
 		t.Errorf("expected source line in output, got %q", out)
 	}
+}
+
+func TestFormatErrorCaret(t *testing.T) {
+	long := `[` + strings.Repeat(`"xxxxxxxxxx", `, 30)
+	tests := []struct {
+		name     string
+		src      string
+		line     string
+		caretPad string
+	}{
+		{"tabs", "{\n\t\t\"a\": x\n}", "\t\t\"a\": x", "\t\t     "},
+		{"multi-byte", "{\"é€\": x}", "{\"é€\": x}", "       "},
+		{"CR line endings", "{\r\"a\": 1,\r\"b\": x\r}", "\"b\": x", "     "},
+		{"BOM", "\xEF\xBB\xBF{\"a\": x}", "{\"a\": x}", "      "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.src))
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			lines := strings.Split(FormatError([]byte(tt.src), err), "\n")
+			if len(lines) < 3 || lines[1] != "  "+tt.line || lines[2] != "  "+tt.caretPad+"^" {
+				t.Errorf("got %q", lines)
+			}
+		})
+	}
+
+	t.Run("long line", func(t *testing.T) {
+		src := long + "x]"
+		_, err := Parse([]byte(src))
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		lines := strings.Split(FormatError([]byte(src), err), "\n")
+		if len(lines) < 3 || len(lines[1]) > 130 || !strings.HasPrefix(lines[1], "  ...") {
+			t.Fatalf("got %q", lines)
+		}
+		caret := strings.Index(lines[2], "^")
+		if caret < 0 || lines[1][caret] != 'x' || lines[1][caret+1] != ']' {
+			t.Errorf("caret not under x: %q", lines[1:3])
+		}
+	})
 }

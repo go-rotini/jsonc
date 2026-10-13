@@ -140,11 +140,12 @@ func parseBracketSegment(s string) (pathSegment, string, error) {
 // PathPointer compiles an RFC 6901 JSON Pointer into a [Path]. The empty
 // string refers to the root; other pointers must start with "/". Tokens use
 // the escapes ~0 for ~ and ~1 for /. A numeric token applied to an array
-// selects an element by index. The "-" token (one past the end of an array)
-// matches nothing; it is meaningful only in a [Patch] add operation.
+// selects an element by index; an index is "0" or digits without a leading
+// zero or sign. The "-" token (one past the end of an array) matches
+// nothing; it is meaningful only in a [Patch] add operation.
 //
-// A pointer that does not start with "/" returns an error wrapping
-// [ErrPointerSyntax].
+// A pointer that does not start with "/", or has a "~" not followed by 0
+// or 1, returns an error wrapping [ErrPointerSyntax].
 func PathPointer(ptr string) (Path, error) {
 	p := Path{expr: ptr}
 	if ptr == "" {
@@ -154,27 +155,61 @@ func PathPointer(ptr string) (Path, error) {
 		return Path{}, fmt.Errorf("%w: pointer must start with /", ErrPointerSyntax)
 	}
 	for tok := range strings.SplitSeq(ptr[1:], "/") {
-		decoded := decodePointerToken(tok)
+		decoded, err := decodePointerToken(tok)
+		if err != nil {
+			return Path{}, err
+		}
 		// In a JSON Pointer the same token can refer to either an object
 		// member or an array index — the structure of the document
-		// determines which. We default to a child segment; the index is
-		// resolved at lookup time when a numeric token is applied to an
-		// array.
-		seg := pathSegment{kind: segChild, name: decoded}
-		if i, err := strconv.Atoi(decoded); err == nil && i >= 0 {
-			seg.index = i
-		}
-		p.segments = append(p.segments, seg)
+		// determines which. The index is resolved at lookup time when the
+		// token is applied to an array.
+		p.segments = append(p.segments, pathSegment{kind: segChild, name: decoded})
 	}
 	return p, nil
 }
 
-// decodePointerToken applies RFC 6901 escape rules: ~1 → /, ~0 → ~. The
-// order matters (do ~1 before ~0).
-func decodePointerToken(tok string) string {
-	tok = strings.ReplaceAll(tok, "~1", "/")
-	tok = strings.ReplaceAll(tok, "~0", "~")
-	return tok
+// decodePointerToken applies RFC 6901 escape rules: ~1 → /, ~0 → ~. Any
+// other use of ~ is an error wrapping [ErrPointerSyntax].
+func decodePointerToken(tok string) (string, error) {
+	if !strings.Contains(tok, "~") {
+		return tok, nil
+	}
+	var sb strings.Builder
+	for i := 0; i < len(tok); i++ {
+		if tok[i] != '~' {
+			sb.WriteByte(tok[i])
+			continue
+		}
+		if i+1 >= len(tok) || (tok[i+1] != '0' && tok[i+1] != '1') {
+			return "", fmt.Errorf("%w: invalid escape in %q", ErrPointerSyntax, tok)
+		}
+		if tok[i+1] == '0' {
+			sb.WriteByte('~')
+		} else {
+			sb.WriteByte('/')
+		}
+		i++
+	}
+	return sb.String(), nil
+}
+
+// parseArrayIndex parses an RFC 6901 array index: "0" or a decimal number
+// without a leading zero or sign. It returns -1 for anything else,
+// including a number too large for an int.
+func parseArrayIndex(tok string) int {
+	if tok == "" || (tok[0] == '0' && len(tok) > 1) {
+		return -1
+	}
+	for i := range len(tok) {
+		if tok[i] < '0' || tok[i] > '9' {
+			return -1
+		}
+	}
+	i, err := strconv.Atoi(tok)
+	if err != nil {
+		return -1
+	}
+	return i
 }
 
 // Read returns the nodes matched by p under root, or nil when none match.
@@ -243,10 +278,27 @@ func (p Path) Replace(root, value *Node) error {
 				n.Children = []*Node{cloneNode(value)}
 			}
 		default:
-			*n = *cloneNode(value)
+			*n = *replacementNode(n, value)
 		}
 	}
 	return nil
+}
+
+// replacementNode returns a deep copy of value to take old's place. When
+// value has no comments, the copy takes old's comments, so replacing an
+// array element or the root keeps them as replacing a member does.
+func replacementNode(old, value *Node) *Node {
+	out := cloneNode(value)
+	if out != nil && old != nil && !hasComments(out) {
+		out.HeadComment, out.Comment, out.FootComment, out.TrailComment =
+			old.HeadComment, old.Comment, old.FootComment, old.TrailComment
+	}
+	return out
+}
+
+// hasComments reports whether n has any comment of its own.
+func hasComments(n *Node) bool {
+	return n.HeadComment != "" || n.Comment != "" || n.FootComment != "" || n.TrailComment != ""
 }
 
 // Append appends a deep copy of value to every container matched by p. For
@@ -279,11 +331,16 @@ func (p Path) Append(root, value *Node) error {
 
 // Delete removes every node matched by p from its parent container: an
 // object member together with its key, or an array element. It returns
-// [ErrPathNotFound] if p matches no nodes.
+// [ErrPathNotFound] if p matches no nodes, and an error wrapping
+// [ErrPathSyntax] without deleting anything if p matches the root, which
+// has no container to be removed from.
 func (p Path) Delete(root *Node) error {
 	matches := p.Read(root)
 	if len(matches) == 0 {
 		return ErrPathNotFound
+	}
+	if slices.Contains(matches, root) {
+		return fmt.Errorf("%w: cannot delete the root", ErrPathSyntax)
 	}
 	parents := mapNodeParents(root)
 	// Reverse iteration so index shifts from earlier deletes don't invalidate
@@ -313,7 +370,7 @@ func applySegment(cur []*Node, seg pathSegment) []*Node {
 			// JSON Pointer leaves array-vs-object resolution to the document.
 			// If the node is an array and the segment name parses as a
 			// non-negative integer, treat it as an index.
-			if len(next) == 0 && n.Kind == ArrayNode {
+			if n.Kind == ArrayNode {
 				if i := seg.indexFromName(); i >= 0 && i < len(n.Children) {
 					next = append(next, n.Children[i])
 				}
@@ -331,14 +388,10 @@ func applySegment(cur []*Node, seg pathSegment) []*Node {
 	return next
 }
 
-// indexFromName attempts to interpret a child segment's name as a numeric
-// index (used when a JSON Pointer token addresses an array slot).
+// indexFromName interprets a child segment's name as an array index (used
+// when a JSON Pointer token addresses an array slot), or returns -1.
 func (s pathSegment) indexFromName() int {
-	i, err := strconv.Atoi(s.name)
-	if err != nil || i < 0 {
-		return -1
-	}
-	return i
+	return parseArrayIndex(s.name)
 }
 
 // childByName returns the value child(ren) of n whose member name equals

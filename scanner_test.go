@@ -551,3 +551,35 @@ func TestScannerEmptyInput(t *testing.T) {
 		t.Error("Valid([]) should be false")
 	}
 }
+
+// newScanner returns a scanner ready to tokenize src, for tests. It strips a UTF-8 BOM
+// at byte 0 and rejects non-UTF-8 BOMs (UTF-16/UTF-32) with a clear
+// [SyntaxError] directing the caller to transcode first.
+func newScanner(src []byte) (*scanner, error) {
+	src, err := stripBOM(src)
+	if err != nil {
+		return nil, err
+	}
+	return &scanner{
+		src:  src,
+		line: 1,
+		col:  1,
+	}, nil
+}
+
+// scan tokenizes the entire input, bracketed by stream start and end
+// tokens. It returns the tokens or the first error encountered.
+func (s *scanner) scan() ([]token, error) {
+	tokens := []token{{kind: tokenStreamStart, pos: s.position()}}
+	for {
+		tk, err := s.next()
+		if err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, tk)
+		if tk.kind == tokenEOF {
+			break
+		}
+	}
+	return append(tokens, token{kind: tokenStreamEnd, pos: s.position()}), nil
+}

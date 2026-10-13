@@ -3,6 +3,7 @@ package jsonc
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestToJSONStripsComments(t *testing.T) {
@@ -248,5 +249,49 @@ func TestNodeToBytesCommentPlacement(t *testing.T) {
 	want := "{\n  // head\n  \"a\": 1, // about a\n  \"b\": [\n    1, // one\n    2\n  ]\n}"
 	if string(out) != want {
 		t.Errorf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+func TestFormatKeySurrogate(t *testing.T) {
+	src := `{"\ud800": "\ud800", "\u0041": 1}`
+	got, err := Format([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\n  \"\\ud800\": \"\\ud800\",\n  \"\\u0041\": 1\n}"
+	if string(got) != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestFormatIdempotentBlankComments(t *testing.T) {
+	for _, src := range []string{"{}// ", "{}//", "{} /**/", "1 // \n", "{\n  // \n  \"a\": 1 /* */\n}", "[1, //\n 2]", "{/*\r0*/}", "/*\n \n x */ 1"} {
+		once, err := Format([]byte(src))
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		twice, err := Format(once)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(once) != string(twice) {
+			t.Errorf("%q: Format = %q, then %q", src, once, twice)
+		}
+	}
+}
+
+func TestToJSONInvalidUTF8(t *testing.T) {
+	src := []byte("{\"k\xff\": \"a\xffb\"}")
+	for name, fn := range map[string]func([]byte) ([]byte, error){
+		"ToJSON": ToJSON,
+		"Format": func(b []byte) ([]byte, error) { return Format(b) },
+	} {
+		got, err := fn(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !utf8.Valid(got) {
+			t.Errorf("%s output is not UTF-8: %q", name, got)
+		}
 	}
 }

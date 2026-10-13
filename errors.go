@@ -5,15 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
-// Position identifies a location within JSONC source text.
+// Position identifies a location within JSONC source text. An error's
+// position is where it was detected, which can be the start of the
+// offending token rather than the bad character inside it.
 type Position struct {
 	// Line is the 1-indexed line number; 0 means "no position".
 	Line int
-	// Column is the 1-indexed column number on Line.
+	// Column is the 1-indexed column on Line, counted in bytes.
 	Column int
 	// Offset is the 0-indexed byte offset from the start of the input.
+	// Column and Offset do not count a leading UTF-8 byte-order mark.
 	Offset int
 }
 
@@ -211,7 +215,9 @@ func (e *StrictJSONError) Is(target error) bool {
 	return ok
 }
 
-// Sentinel errors for use with [errors.Is].
+// Sentinel errors for use with [errors.Is]. Never pass one's address to
+// [errors.As] (as in &ErrSyntax): that overwrites the shared sentinel.
+// Declare a variable of the error type for errors.As instead.
 var (
 	// ErrSyntax indicates malformed JSONC input.
 	ErrSyntax = &SyntaxError{}
@@ -255,34 +261,106 @@ var (
 // error that carries a [Position] ([SyntaxError], [DuplicateKeyError],
 // [OverflowError], [StrictJSONError], [UnknownFieldError], [ValidationError]
 // or [DefaultError], possibly wrapped), the output adds the offending source
-// line and a caret under the column. For any other error, or a position
-// outside data, it returns err.Error(). Pass true for color to add ANSI color
-// escape sequences.
+// line and a caret under the column. Lines end at "\n", "\r\n" or "\r", as
+// for the parser; a line longer than 120 bytes is cut to the part around
+// the column, with "..." marking what was cut. For any other error, or a
+// position outside data, it returns err.Error(). Pass true for color to add
+// ANSI color escape sequences.
 func FormatError(data []byte, err error, color ...bool) string {
 	pos := extractPosition(err)
 	if pos.Line == 0 {
 		return err.Error()
 	}
 
-	lines := bytes.Split(data, []byte("\n"))
-	lineIdx := pos.Line - 1
-	if lineIdx < 0 || lineIdx >= len(lines) {
+	src, ok := sourceLine(bytes.TrimPrefix(data, utf8BOM), pos.Line)
+	if !ok {
 		return err.Error()
 	}
+	line, col := clipLine(src, min(max(pos.Column-1, 0), len(src)))
+	pad := caretPadding(line[:col])
 
 	useColor := len(color) > 0 && color[0]
 
 	var buf bytes.Buffer
 	if useColor {
 		fmt.Fprintf(&buf, "\x1b[1;31m%s\x1b[0m\n", err.Error())
-		fmt.Fprintf(&buf, "  %s\n", string(lines[lineIdx]))
-		fmt.Fprintf(&buf, "  %s\x1b[1;31m^\x1b[0m\n", repeatByte(' ', pos.Column-1))
+		fmt.Fprintf(&buf, "  %s\n", line)
+		fmt.Fprintf(&buf, "  %s\x1b[1;31m^\x1b[0m\n", pad)
 	} else {
 		fmt.Fprintf(&buf, "%s\n", err.Error())
-		fmt.Fprintf(&buf, "  %s\n", string(lines[lineIdx]))
-		fmt.Fprintf(&buf, "  %s^\n", repeatByte(' ', pos.Column-1))
+		fmt.Fprintf(&buf, "  %s\n", line)
+		fmt.Fprintf(&buf, "  %s^\n", pad)
 	}
 	return buf.String()
+}
+
+// utf8BOM is the UTF-8 byte-order mark.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// formatErrorWidth is the longest source line [FormatError] shows whole.
+const formatErrorWidth = 120
+
+// sourceLine returns the 1-indexed line n of data, splitting on "\n",
+// "\r\n" and "\r" as the scanner does.
+func sourceLine(data []byte, n int) ([]byte, bool) {
+	for line := 1; ; line++ {
+		end := bytes.IndexAny(data, "\r\n")
+		if line == n {
+			if end < 0 {
+				return data, true
+			}
+			return data[:end], true
+		}
+		if end < 0 {
+			return nil, false
+		}
+		if data[end] == '\r' && end+1 < len(data) && data[end+1] == '\n' {
+			end++
+		}
+		data = data[end+1:]
+	}
+}
+
+// clipLine cuts a line longer than formatErrorWidth to a window around the
+// byte offset col, on rune boundaries, marking cut ends with "...". It
+// returns the line and col's offset in it.
+func clipLine(line []byte, col int) (string, int) {
+	if len(line) <= formatErrorWidth {
+		return string(line), col
+	}
+	start := max(col-formatErrorWidth/2, 0)
+	for start > 0 && !utf8.RuneStart(line[start]) {
+		start--
+	}
+	end := min(start+formatErrorWidth, len(line))
+	for end < len(line) && !utf8.RuneStart(line[end]) {
+		end++
+	}
+	var sb strings.Builder
+	if start > 0 {
+		sb.WriteString("...")
+	}
+	newCol := sb.Len() + col - start
+	sb.Write(line[start:end])
+	if end < len(line) {
+		sb.WriteString("...")
+	}
+	return sb.String(), newCol
+}
+
+// caretPadding returns the indentation that puts a caret under the
+// character after prefix: the tabs in prefix kept, and one space for each
+// other character.
+func caretPadding(prefix string) string {
+	var sb strings.Builder
+	for _, r := range prefix {
+		if r == '\t' {
+			sb.WriteByte('\t')
+		} else {
+			sb.WriteByte(' ')
+		}
+	}
+	return sb.String()
 }
 
 func extractPosition(err error) Position {
@@ -311,15 +389,4 @@ func extractPosition(err error) Position {
 	default:
 		return Position{}
 	}
-}
-
-func repeatByte(b byte, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	buf := make([]byte, n)
-	for i := range buf {
-		buf[i] = b
-	}
-	return string(buf)
 }

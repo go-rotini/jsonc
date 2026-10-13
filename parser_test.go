@@ -348,6 +348,27 @@ func TestParseMaxDepth(t *testing.T) {
 	}
 }
 
+func TestMaxDepthCountsContainers(t *testing.T) {
+	wrap := func(open, closing string, n int) []byte {
+		return []byte(strings.Repeat(open, n) + "1" + strings.Repeat(closing, n))
+	}
+	if !Valid(wrap("[", "]", 100)) || !Valid(wrap(`{"a":`, "}", 100)) {
+		t.Error("a scalar inside 100 containers should be accepted by default")
+	}
+	if Valid(wrap("[", "]", 101)) {
+		t.Error("101 containers should be rejected by default")
+	}
+	if _, err := Parse([]byte(`1`), WithMaxDepth(1)); err != nil {
+		t.Errorf("scalar root at max depth 1: %v", err)
+	}
+	if _, err := Parse([]byte(`[1]`), WithMaxDepth(1)); err != nil {
+		t.Errorf("[1] at max depth 1: %v", err)
+	}
+	if _, err := Parse([]byte(`[[1]]`), WithMaxDepth(1)); err == nil {
+		t.Error("[[1]] at max depth 1: want error")
+	}
+}
+
 func TestParseMaxNodes(t *testing.T) {
 	src := `[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]`
 	_, err := Parse([]byte(src), WithMaxNodes(3))
