@@ -246,8 +246,9 @@ var (
 	// ErrPatchSyntax indicates an invalid RFC 6902 JSON Patch document.
 	ErrPatchSyntax = errors.New("jsonc: invalid JSON Patch syntax")
 	// ErrPatchTestFailed indicates a JSON Patch "test" operation found a
-	// value different from the expected one.
-	ErrPatchTestFailed = errors.New("jsonc: JSON Patch test failed")
+	// value different from the expected one. It also matches
+	// [ErrPatchSyntax], so checks for that error still catch a failed test.
+	ErrPatchTestFailed error = patchTestError{}
 	// ErrNilPointer indicates a nil pointer was passed where a non-nil pointer is required.
 	ErrNilPointer = errors.New("jsonc: non-nil pointer required")
 	// ErrDocumentSize indicates the input exceeds the configured [WithMaxDocumentSize] limit.
@@ -256,6 +257,14 @@ var (
 	// functions, complex numbers, cyclic data, or an unsupported map key type).
 	ErrUnsupportedValue = errors.New("jsonc: unsupported value")
 )
+
+// patchTestError is the type of [ErrPatchTestFailed].
+type patchTestError struct{}
+
+func (patchTestError) Error() string { return "jsonc: JSON Patch test failed" }
+
+// Is reports whether target is [ErrPatchSyntax].
+func (patchTestError) Is(target error) bool { return target == ErrPatchSyntax }
 
 // FormatError formats err for display against the source data. For an
 // error that carries a [Position] ([SyntaxError], [DuplicateKeyError],

@@ -32,8 +32,8 @@ func TestSentinelErrorsIs(t *testing.T) {
 }
 
 func TestPlainSentinelErrors(t *testing.T) {
-	// These sentinels are plain errors (errors.New), so wrapping and Is
-	// follow normal Go semantics.
+	// Wrapping these sentinels and matching them with errors.Is follow
+	// normal Go semantics.
 	tests := []struct {
 		name     string
 		sentinel error
@@ -58,6 +58,19 @@ func TestPlainSentinelErrors(t *testing.T) {
 				t.Errorf("%s.Error() = %q, want to contain %q", tt.name, tt.sentinel.Error(), tt.msg)
 			}
 		})
+	}
+}
+
+func TestPatchTestFailedMatchesPatchSyntax(t *testing.T) {
+	wrapped := fmt.Errorf("op 0: %w", ErrPatchTestFailed)
+	if !errors.Is(wrapped, ErrPatchTestFailed) {
+		t.Error("errors.Is(wrapped, ErrPatchTestFailed) = false, want true")
+	}
+	if !errors.Is(wrapped, ErrPatchSyntax) {
+		t.Error("errors.Is(wrapped, ErrPatchSyntax) = false, want true")
+	}
+	if errors.Is(fmt.Errorf("op 0: %w", ErrPatchSyntax), ErrPatchTestFailed) {
+		t.Error("a syntax error must not match ErrPatchTestFailed")
 	}
 }
 

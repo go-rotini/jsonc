@@ -171,8 +171,8 @@ func TestPatchTestFails(t *testing.T) {
 	if !errors.Is(err, ErrPatchTestFailed) {
 		t.Errorf("expected ErrPatchTestFailed, got %v", err)
 	}
-	if errors.Is(err, ErrPatchSyntax) {
-		t.Errorf("a failed test is not a syntax error: %v", err)
+	if !errors.Is(err, ErrPatchSyntax) {
+		t.Errorf("a failed test should also match ErrPatchSyntax, got %v", err)
 	}
 }
 
