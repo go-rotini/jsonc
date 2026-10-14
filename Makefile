@@ -30,7 +30,8 @@ lint:
 	go mod verify -modfile=tools.mod
 	$(TOOL) golangci-lint run ./...
 	$(TOOL) go-licenses check ./...
-	$(TOOL) govulncheck ./...
+	@$(MAKE) --no-print-directory vuln
+	@$(MAKE) --no-print-directory vuln-tools
 
 test: clone-test-suite
 	@go test -v -count=1 -coverprofile=test.out .
@@ -47,13 +48,30 @@ test-conformance: clone-test-suite
 	@go test -v -count=1 -run 'TestJSONTestSuite|TestJSONCEdgeCases' -coverprofile=test_conformance.out .
 	@go tool cover -func=test_conformance.out | tail -1
 
+# Every FuzzXxx target, one at a time (go test -fuzz takes a single target), for FUZZTIME each.
+# The targets are listed from the test files, so a new or renamed one runs without editing this
+# file, and a package that fails to build fails the run. When -fuzztime runs out, go test can lose
+# a race with its own deadline and fail with a bare "context deadline exceeded" and no failing
+# input; that outcome counts as a pass.
+FUZZTIME ?= 60s
+
 test-fuzz:
-	@go test -fuzz=FuzzUnmarshal -fuzztime=60s -run=^$$ .
-	@go test -fuzz=FuzzScanner -fuzztime=60s -run=^$$ .
-	@go test -fuzz=FuzzRoundTrip -fuzztime=60s -run=^$$ .
-	@go test -fuzz=FuzzValid -fuzztime=60s -run=^$$ .
-	@go test -fuzz=FuzzFormat -fuzztime=60s -run=^$$ .
-	@go test -fuzz=FuzzMinimize -fuzztime=60s -run=^$$ .
+	@log=$$(mktemp); trap 'rm -f "$$log"' EXIT; \
+	for pkg in $$(go list ./...); do \
+		list=$$(go test -list '^Fuzz' "$$pkg") || { echo "$$list"; exit 1; }; \
+		for name in $$(echo "$$list" | grep '^Fuzz'); do \
+			echo "→ $$pkg $$name"; \
+			go test -fuzz="^$$name$$" -fuzztime=$(FUZZTIME) -run=^$$ "$$pkg" >"$$log" 2>&1; status=$$?; \
+			cat "$$log"; \
+			if [ $$status -ne 0 ]; then \
+				if grep -q '^    context deadline exceeded$$' "$$log" && ! grep -q 'Failing input written' "$$log"; then \
+					echo "→ $$name: fuzz time elapsed; deadline race in go test, no failing input"; \
+				else \
+					exit 1; \
+				fi; \
+			fi; \
+		done; \
+	done
 
 test-mutation: clone-test-suite
 	@$(TOOL) github.com/go-gremlins/gremlins/cmd/gremlins unleash --config .gremlins.yaml
@@ -62,9 +80,14 @@ test-race:
 	@go test -race -count=1 -coverprofile=test_race.out .
 	@go tool cover -func=test_race.out | tail -1
 
-.PHONY: tools-upgrade vuln-tools
+.PHONY: tools-upgrade vuln vuln-tools
 
-# Scans each tool in tools.mod as a built binary: that is exactly the code that runs.
+# govulncheck, one target per dependency graph; lint runs both. vuln scans go.mod from source,
+# test files included, which reports only vulnerable code this module can reach. vuln-tools scans
+# each tool in tools.mod as a built binary: that is exactly the code that runs.
+vuln:
+	@$(TOOL) govulncheck -test ./...
+
 vuln-tools:
 	@bin=$$(mktemp -d); trap 'rm -rf "$$bin"' EXIT; \
 	for pkg in $$(go list -modfile=tools.mod tool); do \

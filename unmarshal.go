@@ -9,21 +9,22 @@ import (
 	"os"
 )
 
-// RawValue is raw JSONC that has not been decoded. It can be used to
-// delay decoding or to pass through a JSONC value without interpreting
-// it. Analogous to [encoding/json.RawMessage].
-//
-// RawValue includes any comments and whitespace that are syntactically
-// inside the value's bounds. To strip comments and trailing commas,
-// producing standard JSON, use [RawValue.Standardize].
+// RawValue is raw JSONC that has not been decoded, like
+// [encoding/json.RawMessage]. Use it to delay decoding or to pass a value
+// through unchanged. When decoded from an object or array, it holds the
+// source text verbatim, including comments and trailing commas inside the
+// value; [RawValue.Standardize] converts it to standard JSON. The encoder
+// writes it verbatim (converted under [WithStrictJSONOutput]) and returns
+// an error if it is not exactly one JSONC value.
 type RawValue []byte
 
-// Unmarshal decodes the raw JSONC value into v.
+// Unmarshal decodes r into v, as [UnmarshalWithOptions] does.
 func (r RawValue) Unmarshal(v any, opts ...DecodeOption) error {
 	return UnmarshalWithOptions(r, v, opts...)
 }
 
-// MarshalJSONC returns the raw bytes verbatim. Implements [Marshaler].
+// MarshalJSONC implements [Marshaler]. It returns r verbatim, or "null" if r
+// is empty.
 func (r RawValue) MarshalJSONC() ([]byte, error) {
 	if len(r) == 0 {
 		return []byte("null"), nil
@@ -31,7 +32,7 @@ func (r RawValue) MarshalJSONC() ([]byte, error) {
 	return r, nil
 }
 
-// UnmarshalJSONC stores the raw bytes verbatim. Implements [BytesUnmarshaler].
+// UnmarshalJSONC implements [BytesUnmarshaler] by storing a copy of data.
 func (r *RawValue) UnmarshalJSONC(data []byte) error {
 	*r = append((*r)[:0], data...)
 	return nil
@@ -47,9 +48,10 @@ func (r RawValue) Standardize() ([]byte, error) {
 // block comments and trailing commas (per JWCC). For RFC 8259-strict
 // behavior, use [UnmarshalWithOptions] with [WithStrictJSON].
 //
-// v must be a non-nil pointer to a Go value. The Go target may be any
-// type supported by the decoder; see the package documentation for the
-// type-mapping table.
+// v must be a non-nil pointer; otherwise Unmarshal returns [ErrNilPointer].
+// See the package documentation for the type mapping. Values that cannot be
+// assigned to their targets are collected and reported together in a
+// [TypeError] after decoding the rest of the input.
 func Unmarshal(data []byte, v any) error {
 	return UnmarshalWithOptions(data, v)
 }
@@ -89,16 +91,26 @@ func DecodeFile(path string, v any, opts ...DecodeOption) error {
 	return UnmarshalWithOptions(data, v, opts...)
 }
 
-// Decoder reads JSONC values from an input stream. It supports decoding
-// multiple top-level values back-to-back from a single reader, matching
-// [encoding/json.Decoder] semantics.
+// Decoder reads a sequence of top-level JSONC values from an input, like
+// [encoding/json.Decoder]. Unlike that type, it reads the whole input into
+// memory on the first call to [Decoder.Decode] or [Decoder.More], so it is
+// not suited to unbounded streams. With [WithMaxDocumentSize], it reads at
+// most that many bytes and fails with [ErrDocumentSize] when the input is
+// longer. The other limits apply to each value separately.
+//
+// The input is scanned once, as values are decoded. A syntax error is
+// reported by the Decode call that reaches it, after the values before it
+// have been decoded, and every later call returns the same error. Error
+// positions count from the start of the input.
 type Decoder struct {
 	r        io.Reader
 	opts     *decoderOptions
 	ctx      context.Context //nolint:containedctx // by design
-	buf      []byte          // unread portion of input (after the most recent decode)
+	p        *parser         // parses the input; set once it is loaded
+	bom      int             // length of the byte-order mark stripped from the input
 	loaded   bool            // true once we've read from r
-	consumed int64           // bytes consumed by previous decodes
+	err      error           // syntax or limit error; returned by every later call
+	consumed int64           // input offset just past the most recently decoded value
 }
 
 // NewDecoder creates a [Decoder] that reads from r.
@@ -114,48 +126,42 @@ func NewDecoder(r io.Reader, opts ...DecodeOption) *Decoder {
 	}
 }
 
-// Decode reads the next JSONC value from the underlying reader and decodes
-// it into v.
+// Decode decodes the next JSONC value into v. It returns [io.EOF] when no
+// values remain.
 func (dec *Decoder) Decode(v any) error {
 	return dec.DecodeContext(dec.ctx, v)
 }
 
-// DecodeContext reads the next JSONC value with the given context.
+// DecodeContext is like [Decoder.Decode] but passes ctx to any
+// [UnmarshalerContext] it calls.
 func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 	if err := dec.ensureLoaded(); err != nil {
 		return err
 	}
-
-	startOffset, err := dec.findValueStart()
+	root, err := dec.nextValue()
 	if err != nil {
 		return err
 	}
-	if startOffset < 0 {
-		return io.EOF
-	}
-
-	endOffset, err := dec.parseOneValue(ctx, startOffset, v)
-	if err != nil {
-		return err
-	}
-	dec.consumed = int64(endOffset)
-	return nil
+	d := newDecoder(dec.opts)
+	d.ctx = ctx
+	return d.decode(root, v)
 }
 
 // More reports whether there is another JSONC value waiting to be decoded.
+// It also reports true when a syntax error comes next, which the following
+// [Decoder.Decode] returns.
 func (dec *Decoder) More() bool {
-	if err := dec.ensureLoaded(); err != nil {
+	if err := dec.ensureLoaded(); err != nil || dec.err != nil {
 		return false
 	}
-	startOffset, err := dec.findValueStart()
-	if err != nil {
-		return false
-	}
-	return startOffset >= 0
+	dec.p.collectHeadComments()
+	return dec.p.peek().kind != tokenEOF
 }
 
-// InputOffset returns the byte offset (in the input stream) of the next
-// value's first byte (after consumed bytes and whitespace/comments).
+// InputOffset returns the input byte offset where the next [Decoder.Decode]
+// starts scanning: just after the most recently decoded value, past any
+// spaces or tabs that follow it. It is 0 before the
+// first value is decoded.
 func (dec *Decoder) InputOffset() int64 {
 	return dec.consumed
 }
@@ -165,135 +171,84 @@ func (dec *Decoder) SetContext(ctx context.Context) {
 	dec.ctx = ctx
 }
 
-// ensureLoaded reads the entire input into dec.buf on first call.
+// ensureLoaded reads the input on first call and prepares the parser. An
+// input that cannot be parsed at all also sets dec.err, which later calls
+// return.
 func (dec *Decoder) ensureLoaded() error {
 	if dec.loaded {
 		return nil
 	}
-	data, err := io.ReadAll(dec.r)
+	r := dec.r
+	limit := dec.opts.maxDocumentSize
+	if limit > 0 {
+		r = io.LimitReader(r, int64(limit)+1)
+	}
+	data, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("jsonc: %w", err)
 	}
-	dec.buf = data
 	dec.loaded = true
+	if limit > 0 && len(data) > limit {
+		dec.err = ErrDocumentSize
+		return dec.err
+	}
+	src, err := stripBOM(data)
+	if err != nil {
+		dec.err = err
+		return err
+	}
+	dec.bom = len(data) - len(src)
+	dec.p = newParser(src, dec.opts)
 	return nil
 }
 
-// findValueStart scans dec.buf from dec.consumed onward, skipping
-// whitespace and comments. Returns the byte offset of the next non-trivial
-// token, or -1 if EOF.
-func (dec *Decoder) findValueStart() (int, error) {
-	tail := dec.buf[dec.consumed:]
-	if len(tail) == 0 {
-		return -1, nil
+// nextValue parses the next value, skipping whitespace and comments before
+// it. It returns io.EOF when none remain.
+func (dec *Decoder) nextValue() (*node, error) {
+	if dec.err != nil {
+		return nil, dec.err
 	}
-	sc, err := newScanner(tail)
+	p := dec.p
+	p.depth, p.keys, p.nodes = 0, 0, 0
+	lead := p.collectHeadComments()
+	if p.peek().kind == tokenEOF {
+		return nil, io.EOF
+	}
+	root, err := p.parseValue()
 	if err != nil {
-		return -1, err
-	}
-	sc.strictJSON = dec.opts.strictJSON
-	tokens, err := sc.scan()
-	if err != nil {
-		return -1, err
-	}
-	for _, tk := range tokens {
-		switch tk.kind {
-		case tokenStreamStart, tokenStreamEnd, tokenEOF, tokenNewline,
-			tokenLineComment, tokenBlockComment:
-			continue
-		default:
-			return int(dec.consumed) + tk.pos.Offset, nil
+		if p.err != nil {
+			err = p.err
 		}
+		dec.err = err
+		return nil, err
 	}
-	return -1, nil
-}
-
-// parseOneValue parses a single value starting at offset and decodes it
-// into v. Returns the byte offset just after the value (and any trailing
-// inline comment that belongs to it). Trailing whitespace/comments after
-// the value are NOT consumed — they may belong to the next value or be
-// part of the document's footer.
-func (dec *Decoder) parseOneValue(ctx context.Context, offset int, v any) (int, error) {
-	// Re-use the general parser via parseSingleValue, which skips the
-	// "extra data after value" check that one-shot Unmarshal enforces.
-	tail := dec.buf[offset:]
-
-	o := *dec.opts
-	if o.maxDocumentSize > 0 && len(tail) > o.maxDocumentSize {
-		return 0, ErrDocumentSize
+	if lead != "" {
+		root.headComment = appendCommentBlock(lead, root.headComment)
 	}
-
-	root, consumedFromTail, err := parseSingleValue(tail, &o)
-	if err != nil {
-		return 0, err
-	}
-
-	d := newDecoder(&o)
-	d.ctx = ctx
-	if err := d.decode(root, v); err != nil {
-		return 0, err
-	}
-	return offset + consumedFromTail, nil
+	dec.consumed = int64(dec.bom + p.valueEnd())
+	return root, nil
 }
 
 // parseDocument parses a complete JSONC document, rejecting trailing
 // non-comment data. Used by [Unmarshal].
 func parseDocument(data []byte, opts *decoderOptions) (*node, error) {
-	s, err := newScanner(data)
-	if err != nil {
-		return nil, err
-	}
-	s.strictJSON = opts.strictJSON
-	tokens, err := s.scan()
-	if err != nil {
-		return nil, err
-	}
-	p := newParser(tokens, opts).withData(data)
-	root, err := p.parse()
-	if err != nil {
-		return nil, err
-	}
-	return root, nil
+	root, _, err := parseDocumentWarnings(data, opts)
+	return root, err
 }
 
-// parseSingleValue parses one JSONC value from data and returns the byte
-// offset just past it. Trailing whitespace/comments that follow the value
-// are NOT included in the returned offset — the caller is responsible for
-// consuming them on the next call.
-func parseSingleValue(data []byte, opts *decoderOptions) (*node, int, error) {
-	s, err := newScanner(data)
+// parseDocumentWarnings is [parseDocument] that also returns the parser's
+// warnings.
+func parseDocumentWarnings(data []byte, opts *decoderOptions) (*node, []string, error) {
+	src, err := stripBOM(data)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
-	s.strictJSON = opts.strictJSON
-	tokens, err := s.scan()
+	p := newParser(src, opts)
+	root, err := p.parse()
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
-
-	p := newParser(tokens, opts).withData(data)
-	p.consumeIfKind(tokenStreamStart)
-	leadHead := p.collectHeadComments()
-	tk := p.peek()
-	if tk.kind == tokenEOF || tk.kind == tokenStreamEnd {
-		return nil, 0, io.EOF
-	}
-	root, err := p.parseValue()
-	if err != nil {
-		return nil, 0, err
-	}
-	if leadHead != "" {
-		root.headComment = appendCommentBlock(leadHead, root.headComment)
-	}
-
-	if p.pos < len(p.tokens) {
-		nextTok := p.tokens[p.pos]
-		if nextTok.kind == tokenEOF {
-			return root, len(data), nil
-		}
-		return root, nextTok.pos.Offset, nil
-	}
-	return root, len(data), nil
+	return root, p.warnings, nil
 }
 
 // Pin errors.Is in the import set so the docs that reference it stay valid.

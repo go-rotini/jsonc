@@ -7,19 +7,15 @@ import (
 	"os"
 )
 
-// Marshal encodes v as JSONC bytes using default options. The output is
-// compact (no indent, no comments) — for human-readable output, use
-// [MarshalIndent] or [MarshalWithOptions] with [WithIndent].
-//
-// v may be any Go value supported by the encoder; see the package
-// documentation for the type-mapping table.
+// Marshal encodes v as JSONC using default options. The output is compact
+// standard JSON with no comments; for multi-line output use [MarshalIndent]
+// or [MarshalWithOptions] with [WithIndent]. See the package documentation
+// for the type mapping.
 func Marshal(v any) ([]byte, error) {
 	return MarshalWithOptions(v)
 }
 
-// MarshalIndent is a convenience wrapper that produces multi-line output
-// with the given indent string. Equivalent to
-// MarshalWithOptions(v, WithIndent(indent)).
+// MarshalIndent is MarshalWithOptions(v, WithIndent(indent)).
 func MarshalIndent(v any, indent string) ([]byte, error) {
 	return MarshalWithOptions(v, WithIndent(indent))
 }
@@ -34,21 +30,24 @@ func MarshalWithOptions(v any, opts ...EncodeOption) ([]byte, error) {
 	return enc.encode(v)
 }
 
-// MarshalTo encodes v as JSONC and returns the bytes; the type parameter
-// exists for symmetry with [UnmarshalTo] when the caller knows the value
-// type at the call site.
+// MarshalTo is [MarshalWithOptions] with a typed argument, for symmetry with
+// [UnmarshalTo].
 func MarshalTo[T any](v T, opts ...EncodeOption) ([]byte, error) {
 	return MarshalWithOptions(v, opts...)
 }
 
 // EncodeFile encodes v as JSONC and writes the result to the given file
-// path. The file is created (or truncated) with mode 0o644.
+// path. A new file is created with mode 0600, because configuration files
+// often hold secrets; an existing file is truncated and keeps its mode.
+// The write is not atomic: a failure part-way can leave a partial file.
+// For an atomic replace, marshal with [MarshalWithOptions] and write with
+// github.com/go-rotini/fs.
 func EncodeFile(path string, v any, opts ...EncodeOption) error {
 	out, err := MarshalWithOptions(v, opts...)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, out, 0o644); err != nil { //nolint:gosec // user-controlled path; mode chosen for config files
+	if err := os.WriteFile(path, out, 0o600); err != nil {
 		return fmt.Errorf("jsonc: %w", err)
 	}
 	return nil
@@ -77,7 +76,7 @@ func NewEncoder(w io.Writer, opts ...EncodeOption) *Encoder {
 }
 
 // Encode writes the JSONC encoding of v to the stream, followed by a
-// newline. Any error from the underlying writer is returned.
+// newline.
 func (enc *Encoder) Encode(v any) error {
 	return enc.EncodeContext(enc.ctx, v)
 }
@@ -100,15 +99,14 @@ func (enc *Encoder) EncodeContext(ctx context.Context, v any) error {
 	return nil
 }
 
-// SetIndent configures the indent string for subsequent [Encoder.Encode]
-// calls. Equivalent to applying [WithIndent] at construction time.
+// SetIndent sets the indent string for subsequent [Encoder.Encode] calls,
+// as [WithIndent] does.
 func (enc *Encoder) SetIndent(indent string) {
 	enc.opts.indent = indent
 }
 
-// SetEscapeHTML controls HTML-character escaping. Default is false, matching
-// the package-level [Marshal] default and differing from
-// [encoding/json.Encoder] (which defaults to true).
+// SetEscapeHTML sets the [WithEscapeHTML] option. The default is false,
+// unlike [encoding/json.Encoder].
 func (enc *Encoder) SetEscapeHTML(b bool) {
 	enc.opts.escapeHTML = b
 }

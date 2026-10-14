@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -878,5 +880,182 @@ func TestUnmarshalEmptyObjectWithCommentsOnly(t *testing.T) {
 	}
 	if len(v) != 0 {
 		t.Errorf("expected empty map, got %+v", v)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Byte-order mark: raw bytes and Decoder offsets.
+// ---------------------------------------------------------------------------
+
+func TestBOMRawValue(t *testing.T) {
+	src := "\xEF\xBB\xBF{\"a\": {\"b\": 1}, \"c\": [1, 2]}"
+	var v struct {
+		A RawValue
+		C RawValue
+	}
+	if err := Unmarshal([]byte(src), &v); err != nil {
+		t.Fatal(err)
+	}
+	if string(v.A) != `{"b": 1}` || string(v.C) != `[1, 2]` {
+		t.Errorf("A = %q, C = %q", v.A, v.C)
+	}
+}
+
+func TestBOMParsePatch(t *testing.T) {
+	p, err := ParsePatch([]byte("\xEF\xBB\xBF[{\"op\": \"add\", \"path\": \"/a\", \"value\": {\"x\": 1}}]"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p[0].Value == nil || p[0].Value.Kind != ObjectNode {
+		t.Errorf("value = %v", p[0].Value)
+	}
+}
+
+func TestBOMDecoder(t *testing.T) {
+	dec := NewDecoder(strings.NewReader("\xEF\xBB\xBF{\"a\":1} {\"b\":22}"))
+	var first, second map[string]int
+	if err := dec.Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	if got := dec.InputOffset(); got != 11 {
+		t.Errorf("InputOffset = %d, want 11", got)
+	}
+	if err := dec.Decode(&second); err != nil {
+		t.Fatal(err)
+	}
+	if first["a"] != 1 || second["b"] != 22 {
+		t.Errorf("got %v, %v", first, second)
+	}
+	if err := dec.Decode(&second); !errors.Is(err, io.EOF) {
+		t.Errorf("third Decode err = %v, want io.EOF", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Decoder: one scan, errors where they occur.
+// ---------------------------------------------------------------------------
+
+func TestDecoderStream(t *testing.T) {
+	dec := NewDecoder(strings.NewReader("1\n2\n[3,\n true true]"))
+	for _, want := range []int{1, 2} {
+		var n int
+		if err := dec.Decode(&n); err != nil || n != want {
+			t.Fatalf("Decode = %d, %v; want %d", n, err, want)
+		}
+	}
+	if !dec.More() {
+		t.Error("More() = false before the bad value")
+	}
+	var v any
+	err := dec.Decode(&v)
+	var se *SyntaxError
+	if !errors.As(err, &se) || se.Pos.Line != 4 || se.Pos.Column != 7 {
+		t.Fatalf("err = %v, want a syntax error at 4:7", err)
+	}
+	if again := dec.Decode(&v); again == nil || again.Error() != err.Error() {
+		t.Errorf("next Decode err = %v, want %v again", again, err)
+	}
+	if dec.More() {
+		t.Error("More() = true after a syntax error")
+	}
+}
+
+func TestDecoderScanErrorAfterValues(t *testing.T) {
+	dec := NewDecoder(strings.NewReader("1\n2\n[3,\n x]"))
+	for _, want := range []int{1, 2} {
+		var n int
+		if err := dec.Decode(&n); err != nil || n != want {
+			t.Fatalf("Decode = %d, %v; want %d", n, err, want)
+		}
+	}
+	var v any
+	if err := dec.Decode(&v); err == nil {
+		t.Fatal("expected a syntax error")
+	}
+}
+
+func TestDecoderContinuesAfterTypeError(t *testing.T) {
+	dec := NewDecoder(strings.NewReader(`"a" 2`))
+	var n int
+	var te *TypeError
+	if err := dec.Decode(&n); !errors.As(err, &te) {
+		t.Fatalf("err = %v, want TypeError", err)
+	}
+	if err := dec.Decode(&n); err != nil || n != 2 {
+		t.Errorf("Decode = %d, %v; want 2", n, err)
+	}
+}
+
+func TestDecoderStreamScaling(t *testing.T) {
+	var src bytes.Buffer
+	for i := range 20000 {
+		fmt.Fprintf(&src, "{\"i\":%d}\n", i)
+	}
+	start := time.Now()
+	dec := NewDecoder(&src)
+	count := 0
+	for dec.More() {
+		var v map[string]int
+		if err := dec.Decode(&v); err != nil {
+			t.Fatal(err)
+		}
+		count++
+	}
+	if count != 20000 {
+		t.Fatalf("decoded %d values", count)
+	}
+	// One scan takes well under a second; re-scanning the rest of the
+	// input for every value takes minutes.
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("decoding 20000 values took %v", d)
+	}
+}
+
+// countingReader reads n spaces, counting the bytes handed out.
+type countingReader struct {
+	left, read int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	if r.left == 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), r.left)
+	for i := range n {
+		p[i] = ' '
+	}
+	r.left -= n
+	r.read += n
+	return n, nil
+}
+
+func TestDecoderMaxDocumentSizeBoundsRead(t *testing.T) {
+	r := &countingReader{left: 8 << 20}
+	dec := NewDecoder(r, WithMaxDocumentSize(1024))
+	var v any
+	if err := dec.Decode(&v); !errors.Is(err, ErrDocumentSize) {
+		t.Fatalf("err = %v, want ErrDocumentSize", err)
+	}
+	if r.read > 1025 {
+		t.Errorf("read %d bytes with a 1024-byte limit", r.read)
+	}
+}
+
+func TestDecoderMaxDocumentSizeWithinLimit(t *testing.T) {
+	dec := NewDecoder(strings.NewReader("1 2 3"), WithMaxDocumentSize(5))
+	var sum int
+	for {
+		var n int
+		err := dec.Decode(&n)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum += n
+	}
+	if sum != 6 {
+		t.Errorf("sum = %d, want 6", sum)
 	}
 }

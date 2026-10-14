@@ -1,11 +1,15 @@
 package jsonc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"math/big"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1083,6 +1087,28 @@ func TestDecodeApplyDefaultUnsupportedKind(t *testing.T) {
 	}
 }
 
+func TestDecodeApplyDefaultErrorPos(t *testing.T) {
+	type Inner struct {
+		N int `jsonc:"n,default=abc"`
+	}
+	type S struct {
+		Inner Inner `json:"inner"`
+	}
+	src := []byte("{\n  \"inner\": {}\n}")
+	var v S
+	err := UnmarshalWithOptions(src, &v, WithDefaults())
+	var de *DefaultError
+	if !errors.As(err, &de) {
+		t.Fatalf("err = %v, want *DefaultError", err)
+	}
+	if de.Pos.Line != 2 || de.Pos.Column != 12 {
+		t.Errorf("Pos = %+v, want line 2 column 12", de.Pos)
+	}
+	if !strings.Contains(FormatError(src, err), "^") {
+		t.Errorf("FormatError has no caret:\n%s", FormatError(src, err))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // buildMapKey — every supported key type.
 // ---------------------------------------------------------------------------
@@ -1490,5 +1516,290 @@ func TestDecodeIntoPointerToByteSlice(t *testing.T) {
 	}
 	if b == nil || string(*b) != "hello" {
 		t.Errorf("got %v", b)
+	}
+}
+
+func TestNonEmptyInterface(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		v    any
+	}{
+		{"string into Stringer", `{"S":"x"}`, &struct{ S fmt.Stringer }{}},
+		{"object into error", `{"E":{}}`, &struct{ E error }{}},
+		{"bool into error", `{"E":true}`, &struct{ E error }{}},
+		{"number into error", `{"E":1}`, &struct{ E error }{}},
+		{"array into error", `{"E":[1]}`, &struct{ E error }{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var te *TypeError
+			if err := Unmarshal([]byte(tt.src), tt.v); !errors.As(err, &te) {
+				t.Errorf("err = %v, want TypeError", err)
+			}
+		})
+	}
+	var v struct{ E error }
+	if err := Unmarshal([]byte(`{"E":null}`), &v); err != nil || v.E != nil {
+		t.Errorf("null: E = %v, err = %v", v.E, err)
+	}
+}
+
+type namedIface struct{ N string }
+
+func (n *namedIface) String() string { return n.N }
+
+func TestInterfaceHoldingPointer(t *testing.T) {
+	type holder struct {
+		S fmt.Stringer
+		A any
+	}
+	s, a := &namedIface{}, &namedIface{}
+	h := holder{S: s, A: a}
+	if err := Unmarshal([]byte(`{"S":{"N":"x"},"A":{"N":"y"}}`), &h); err != nil {
+		t.Fatal(err)
+	}
+	if h.S != s || h.A != a || s.N != "x" || a.N != "y" {
+		t.Errorf("got S=%#v A=%#v", h.S, h.A)
+	}
+
+	// null clears the interface, unless the pointer points to a pointer,
+	// which is cleared instead.
+	if err := Unmarshal([]byte(`{"S":null}`), &h); err != nil || h.S != nil {
+		t.Errorf("null: S = %v, err = %v", h.S, err)
+	}
+	inner := &namedIface{N: "z"}
+	pp := &inner
+	h2 := holder{A: pp}
+	if err := Unmarshal([]byte(`{"A":null}`), &h2); err != nil || h2.A != any(pp) || inner != nil {
+		t.Errorf("null via **T: A = %v, *pp = %v, err = %v", h2.A, *pp, err)
+	}
+
+	// An interface holding a pointer to itself, or a cycle of two, is
+	// decoded into rather than followed forever.
+	var x any
+	x = &x
+	if err := Unmarshal([]byte(`{"a":1}`), &x); err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := x.(map[string]any); !ok || m["a"] != float64(1) {
+		t.Errorf("self pointer: x = %#v", x)
+	}
+	var y, z any
+	y, z = &z, &y
+	if err := Unmarshal([]byte(`2`), &y); err != nil {
+		t.Fatal(err)
+	}
+	if y != any(float64(2)) || z != any(&y) {
+		t.Errorf("two-cycle: y = %#v, z = %#v", y, z)
+	}
+}
+
+type unexportedInt int
+
+type unexportedInner struct{ X int }
+
+func TestUnexportedEmbeddedDecode(t *testing.T) {
+	var a struct {
+		unexportedInt
+		A int
+	}
+	if err := Unmarshal([]byte(`{"unexportedInt":3,"A":1}`), &a); err != nil {
+		t.Fatal(err)
+	}
+	if a.unexportedInt != 0 || a.A != 1 {
+		t.Errorf("got %+v", a)
+	}
+
+	var b struct{ *unexportedInner }
+	err := Unmarshal([]byte(`{"X":1}`), &b)
+	if !errors.Is(err, ErrUnsupportedValue) {
+		t.Errorf("err = %v, want ErrUnsupportedValue", err)
+	}
+
+	c := struct{ *unexportedInner }{&unexportedInner{}}
+	if err := Unmarshal([]byte(`{"X":2}`), &c); err != nil || c.X != 2 {
+		t.Errorf("X = %d, err = %v", c.X, err)
+	}
+}
+
+func TestCaseInsensitiveDefault(t *testing.T) {
+	var cfg struct {
+		Port int    `jsonc:"port,default=8080"`
+		Name string `jsonc:"name,required"`
+	}
+	if err := UnmarshalWithOptions([]byte(`{"Port":9090,"Name":"x"}`), &cfg, WithDefaults()); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Port != 9090 || cfg.Name != "x" {
+		t.Errorf("got %+v", cfg)
+	}
+}
+
+func TestStringTagRoundTrip(t *testing.T) {
+	type S struct {
+		N  int     `json:"n,string"`
+		P  *int    `json:"p,string"`
+		B  bool    `json:"b,string"`
+		F  float64 `json:"f,string"`
+		Q  string  `json:"q,string"`
+		NP *int    `json:"np,string"`
+	}
+	five := 5
+	in := S{N: 42, P: &five, B: true, F: 1.5, Q: "hi"}
+	data, err := Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	std, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got bytes.Buffer
+	if err := json.Compact(&got, data); err != nil || got.String() != string(std) {
+		t.Errorf("Marshal = %s, encoding/json = %s", data, std)
+	}
+	var out S
+	if err := Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.N != 42 || out.P == nil || *out.P != 5 || !out.B || out.F != 1.5 || out.Q != "hi" || out.NP != nil {
+		t.Errorf("round trip = %+v", out)
+	}
+	// Unquoted values and plain strings still decode.
+	var loose S
+	if err := Unmarshal([]byte(`{"n": 7, "q": "plain"}`), &loose); err != nil || loose.N != 7 || loose.Q != "plain" {
+		t.Errorf("loose = %+v, err = %v", loose, err)
+	}
+}
+
+func TestStringTagRejectsDocumentSyntax(t *testing.T) {
+	type S struct {
+		N int `json:"n,string"`
+	}
+	for _, text := range []string{`/*c*/42`, `42 // hi`, ` 42 `, "42\n", "\xef\xbb\xbf42", `[42]`} {
+		src, _ := json.Marshal(map[string]string{"n": text})
+		var v S
+		var te *TypeError
+		if err := Unmarshal(src, &v); !errors.As(err, &te) {
+			t.Errorf("%q: got N=%d, err=%v; want TypeError", text, v.N, err)
+		}
+	}
+	var q struct {
+		Q string `json:"q,string"`
+	}
+	if err := Unmarshal([]byte(`{"q":"null"}`), &q); err != nil || q.Q != "null" {
+		t.Errorf(`"null" into string: Q=%q, err=%v`, q.Q, err)
+	}
+}
+
+func TestFloat32Overflow(t *testing.T) {
+	var v struct{ F float32 }
+	var oe *OverflowError
+	if err := Unmarshal([]byte(`{"F":1e300}`), &v); !errors.As(err, &oe) {
+		t.Errorf("err = %v, F = %v; want OverflowError", err, v.F)
+	}
+	if err := Unmarshal([]byte(`{"F":3.4e38}`), &v); err != nil {
+		t.Errorf("max float32: %v", err)
+	}
+	for _, f := range []float32{math.MaxFloat32, -math.MaxFloat32} {
+		out, err := Marshal(struct{ F float32 }{f})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Unmarshal(out, &v); err != nil || v.F != f {
+			t.Errorf("%s: F = %v, err = %v; want %v", out, v.F, err, f)
+		}
+	}
+	// The rounding point is MaxFloat32 plus half a last-place unit:
+	// text from there up overflows, and text below it decodes to
+	// MaxFloat32, even when its nearest float64 is the rounding point.
+	for _, text := range []string{
+		"3.4028236e38",
+		"340282356779733661637539395458142568448",
+		"-3.40282356779733661637539395458142568448e38",
+	} {
+		if err := Unmarshal([]byte(`{"F":`+text+`}`), &v); !errors.As(err, &oe) {
+			t.Errorf("%s: err = %v; want OverflowError", text, err)
+		}
+	}
+	for _, text := range []string{
+		"340282356779733661637539395458142568447",
+		"3.40282356779733661637539395458142568447e38",
+		"3.4028235677973366e38",
+		strconv.FormatFloat(math.Nextafter(math.MaxFloat32+0x1p103, 0), 'g', -1, 64),
+	} {
+		v.F = 0
+		if err := Unmarshal([]byte(`{"F":`+text+`}`), &v); err != nil || v.F != math.MaxFloat32 {
+			t.Errorf("%s: F = %v, err = %v; want MaxFloat32", text, v.F, err)
+		}
+	}
+	// One rounding step: this text is just above the midpoint between 1
+	// and the next float32, so it rounds up, as encoding/json decodes it.
+	if err := Unmarshal([]byte(`{"F":1.0000000596046447753906251}`), &v); err != nil || v.F != math.Nextafter32(1, 2) {
+		t.Errorf("midpoint: F = %v, err = %v; want %v", v.F, err, math.Nextafter32(1, 2))
+	}
+	var d struct {
+		F float32 `jsonc:"f,default=3.4028235677973366e38"`
+	}
+	if err := UnmarshalWithOptions([]byte(`{}`), &d, WithDefaults()); err != nil || d.F != math.MaxFloat32 {
+		t.Errorf("default below the rounding point: F = %v, err = %v", d.F, err)
+	}
+	var o struct {
+		F float32 `jsonc:"f,default=1e300"`
+	}
+	var de *DefaultError
+	if err := UnmarshalWithOptions([]byte(`{}`), &o, WithDefaults()); !errors.As(err, &de) {
+		t.Errorf("default past float32: F = %v, err = %v; want DefaultError", o.F, err)
+	}
+}
+
+func TestFloatBeyondFloat64(t *testing.T) {
+	var f struct{ F float64 }
+	var a any
+	var m map[string]any
+	var n struct{ N any }
+	for _, c := range []struct {
+		doc string
+		v   any
+	}{
+		{`{"F": 1e400}`, &f},
+		{`-1e400`, &a},
+		{`{"x": 1e400}`, &m},
+		{`{"N": 1e400}`, &n},
+	} {
+		err := Unmarshal([]byte(c.doc), c.v)
+		var oe *OverflowError
+		if !errors.As(err, &oe) || oe.Pos.Line != 1 || oe.Type != "float64" || strings.Contains(err.Error(), "strconv") {
+			t.Errorf("%s: err = %v, want a positioned float64 OverflowError", c.doc, err)
+		}
+	}
+}
+
+func TestNegativeZeroIntoAny(t *testing.T) {
+	var v any
+	if err := Unmarshal([]byte(`-0`), &v); err != nil {
+		t.Fatal(err)
+	}
+	f, ok := v.(float64)
+	if !ok || f != 0 || !math.Signbit(f) {
+		t.Errorf("got %v, want -0", v)
+	}
+}
+
+func TestDecodeInvalidUTF8(t *testing.T) {
+	var s string
+	if err := Unmarshal([]byte("\"a\xffb\xcf\""), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s != "a�b�" {
+		t.Errorf("got %q", s)
+	}
+	var m map[string]string
+	if err := Unmarshal([]byte("{\"k\xff\": \"v\\n\xff\"}"), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["k�"] != "v\n�" {
+		t.Errorf("got %q", m)
 	}
 }

@@ -3,6 +3,7 @@ package jsonc
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -24,14 +25,16 @@ type PatchOp struct {
 // operations applied as a single transformation.
 type Patch []PatchOp
 
-// ParsePatch decodes data (a JSONC array of operation objects) into a
-// [Patch]. Comments and trailing commas in the input are tolerated; the
-// operation values themselves preserve their JSONC source form.
+// ParsePatch decodes data, a JSONC array of operation objects, into a
+// [Patch]. Comments and trailing commas are accepted, and comments inside
+// an operation's value are kept on its AST. Every operation must have a
+// "path", and "move" and "copy" a "from"; other operation names are not
+// checked until [Patch.Apply]. Errors wrap [ErrPatchSyntax].
 func ParsePatch(data []byte) (Patch, error) {
 	type rawOp struct {
 		Op    string   `json:"op"`
-		Path  string   `json:"path"`
-		From  string   `json:"from,omitempty"`
+		Path  *string  `json:"path"`
+		From  *string  `json:"from,omitempty"`
 		Value RawValue `json:"value,omitempty"`
 	}
 	var ops []rawOp
@@ -40,7 +43,15 @@ func ParsePatch(data []byte) (Patch, error) {
 	}
 	out := make(Patch, len(ops))
 	for i, op := range ops {
-		out[i] = PatchOp{Op: op.Op, Path: op.Path, From: op.From}
+		if op.Path == nil {
+			return nil, fmt.Errorf("%w: op[%d] has no path", ErrPatchSyntax, i)
+		}
+		out[i] = PatchOp{Op: op.Op, Path: *op.Path}
+		if op.From != nil {
+			out[i].From = *op.From
+		} else if op.Op == "move" || op.Op == "copy" {
+			return nil, fmt.Errorf("%w: op[%d] %s has no from", ErrPatchSyntax, i, op.Op)
+		}
 		if len(op.Value) > 0 {
 			f, err := Parse(op.Value)
 			if err != nil {
@@ -52,10 +63,10 @@ func ParsePatch(data []byte) (Patch, error) {
 	return out, nil
 }
 
-// Apply applies p to root in order, returning the resulting [Node]. The
-// input root is not modified — Apply works on a deep clone. Any failure
-// returns an error and leaves the (cloned) intermediate state unobservable
-// to the caller.
+// Apply applies the operations of p in order to a deep copy of root and
+// returns the result; root itself is not modified. If any operation fails,
+// Apply returns a nil node and an error naming the operation. A failed
+// "test" wraps [ErrPatchTestFailed].
 func (p Patch) Apply(root *Node) (*Node, error) {
 	out := cloneNode(root)
 	for i, op := range p {
@@ -100,7 +111,11 @@ func pointerTokens(ptr string) ([]string, error) {
 	raw := strings.Split(ptr[1:], "/")
 	out := make([]string, len(raw))
 	for i, t := range raw {
-		out[i] = decodePointerToken(t)
+		tok, err := decodePointerToken(t)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = tok
 	}
 	return out, nil
 }
@@ -116,19 +131,21 @@ func resolveParent(root *Node, tokens []string) (*Node, string, error) {
 	if len(tokens) == 0 {
 		return nil, "", errResolveRoot
 	}
-	cur := root
-	for _, t := range tokens[:len(tokens)-1] {
-		next, err := descend(cur, t)
-		if err != nil {
-			return nil, "", err
-		}
-		cur = next
+	cur, err := resolveTarget(root, tokens[:len(tokens)-1])
+	if err != nil {
+		return nil, "", err
+	}
+	if cur == nil {
+		return nil, "", fmt.Errorf("%w: no document", ErrPathNotFound)
 	}
 	return cur, tokens[len(tokens)-1], nil
 }
 
 // descend follows one token from n.
 func descend(n *Node, tok string) (*Node, error) {
+	if n == nil {
+		return nil, fmt.Errorf("%w: no document", ErrPathNotFound)
+	}
 	switch n.Kind {
 	case ObjectNode:
 		for _, c := range n.Children {
@@ -138,8 +155,8 @@ func descend(n *Node, tok string) (*Node, error) {
 		}
 		return nil, fmt.Errorf("%w: member %q", ErrPathNotFound, tok)
 	case ArrayNode:
-		i, err := strconv.Atoi(tok)
-		if err != nil || i < 0 || i >= len(n.Children) {
+		i := parseArrayIndex(tok)
+		if i < 0 || i >= len(n.Children) {
 			return nil, fmt.Errorf("%w: index %q", ErrPathNotFound, tok)
 		}
 		return n.Children[i], nil
@@ -205,8 +222,8 @@ func opAdd(root *Node, path string, value *Node) (*Node, error) {
 			parent.Children = append(parent.Children, cloneNode(value))
 			return root, nil
 		}
-		i, err := strconv.Atoi(last)
-		if err != nil || i < 0 || i > len(parent.Children) {
+		i := parseArrayIndex(last)
+		if i < 0 || i > len(parent.Children) {
 			return nil, fmt.Errorf("%w: array index %q", ErrPointerSyntax, last)
 		}
 		parent.Children = append(parent.Children, nil)
@@ -241,8 +258,8 @@ func opRemove(root *Node, path string) (*Node, error) {
 		}
 		return nil, fmt.Errorf("%w: member %q", ErrPathNotFound, last)
 	case ArrayNode:
-		i, err := strconv.Atoi(last)
-		if err != nil || i < 0 || i >= len(parent.Children) {
+		i := parseArrayIndex(last)
+		if i < 0 || i >= len(parent.Children) {
 			return nil, fmt.Errorf("%w: array index %q", ErrPointerSyntax, last)
 		}
 		parent.Children = append(parent.Children[:i], parent.Children[i+1:]...)
@@ -252,8 +269,9 @@ func opRemove(root *Node, path string) (*Node, error) {
 	}
 }
 
-// opReplace implements "replace" — equivalent to remove+add but the target
-// must exist.
+// opReplace implements "replace": the target must exist, and its value is
+// overwritten in place. A replaced array element keeps its comments when
+// value has none.
 func opReplace(root *Node, path string, value *Node) (*Node, error) {
 	if value == nil {
 		return nil, fmt.Errorf("%w: replace requires value", ErrPatchSyntax)
@@ -265,22 +283,42 @@ func opReplace(root *Node, path string, value *Node) (*Node, error) {
 	if len(tokens) == 0 {
 		return cloneNode(value), nil
 	}
-	// Replace differs from add only in requiring the target to exist;
-	// confirm it does, then defer to add for the actual write.
-	if _, err := resolveTarget(root, tokens); err != nil {
+	parent, last, err := resolveParent(root, tokens)
+	if err != nil {
 		return nil, err
 	}
-	return opAdd(root, path, value)
+	switch parent.Kind {
+	case ObjectNode:
+		if kv := memberNode(parent, last); kv != nil {
+			kv.Children = []*Node{cloneNode(value)}
+			return root, nil
+		}
+		return nil, fmt.Errorf("%w: member %q", ErrPathNotFound, last)
+	case ArrayNode:
+		i := parseArrayIndex(last)
+		if i < 0 || i >= len(parent.Children) {
+			return nil, fmt.Errorf("%w: index %q", ErrPathNotFound, last)
+		}
+		parent.Children[i] = replacementNode(parent.Children[i], value)
+		return root, nil
+	default:
+		return nil, fmt.Errorf("%w: cannot descend into %s", ErrPathNotFound, parent.Kind)
+	}
 }
 
-// opMove removes from `from` and adds at `path`.
+// memberNode returns obj's KeyValueNode named key, or nil.
+func memberNode(obj *Node, key string) *Node {
+	for _, c := range obj.Children {
+		if c.Kind == KeyValueNode && c.Key == key {
+			return c
+		}
+	}
+	return nil
+}
+
+// opMove removes from `from` and adds at `path`. A member moved to another
+// member keeps its comments.
 func opMove(root *Node, from, path string) (*Node, error) {
-	if from == path {
-		return root, nil
-	}
-	if strings.HasPrefix(path, from+"/") {
-		return nil, fmt.Errorf("%w: cannot move into descendant", ErrPatchSyntax)
-	}
 	tokens, err := pointerTokens(from)
 	if err != nil {
 		return nil, err
@@ -289,12 +327,35 @@ func opMove(root *Node, from, path string) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	dstTokens, err := pointerTokens(path)
+	if err != nil {
+		return nil, err
+	}
+	if from == path {
+		return root, nil
+	}
+	if strings.HasPrefix(path, from+"/") {
+		return nil, fmt.Errorf("%w: cannot move into descendant", ErrPatchSyntax)
+	}
+	var srcMember *Node
+	if parent, last, err := resolveParent(root, tokens); err == nil && parent.Kind == ObjectNode {
+		srcMember = memberNode(parent, last)
+	}
 	moved := cloneNode(val)
 	root, err = opRemove(root, from)
 	if err != nil {
 		return nil, err
 	}
-	return opAdd(root, path, moved)
+	root, err = opAdd(root, path, moved)
+	if err != nil || srcMember == nil {
+		return root, err
+	}
+	if parent, last, err := resolveParent(root, dstTokens); err == nil && parent.Kind == ObjectNode {
+		if dst := memberNode(parent, last); dst != nil && !hasComments(dst) {
+			dst.HeadComment, dst.Comment, dst.FootComment = srcMember.HeadComment, srcMember.Comment, srcMember.FootComment
+		}
+	}
+	return root, nil
 }
 
 // opCopy clones the node at `from` and adds it at `path`.
@@ -329,13 +390,14 @@ func opTest(root *Node, path string, value *Node) (*Node, error) {
 		}
 	}
 	if !nodeEqual(target, value) {
-		return nil, fmt.Errorf("%w: test failed at %q", ErrPatchSyntax, path)
+		return nil, fmt.Errorf("%w at %q", ErrPatchTestFailed, path)
 	}
 	return root, nil
 }
 
-// nodeEqual reports whether two nodes are equal as JSON values, ignoring
-// comments and source form. Used by the "test" operation.
+// nodeEqual reports whether two nodes are equal as JSON values (RFC 6902
+// section 4.6), ignoring comments and source form: numbers compare by
+// numeric value, so 1, 1.0 and 1e0 are equal. Used by the "test" operation.
 func nodeEqual(a, b *Node) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -344,7 +406,9 @@ func nodeEqual(a, b *Node) bool {
 		return false
 	}
 	switch a.Kind {
-	case StringNode, NumberNode, BooleanNode, NullNode:
+	case NumberNode:
+		return numbersEqual(a.Value, b.Value)
+	case StringNode, BooleanNode, NullNode:
 		return a.Value == b.Value
 	case ArrayNode:
 		av := nonCommentChildren(a)
@@ -397,4 +461,64 @@ func objectMembers(n *Node) map[string]*Node {
 		out[c.Key] = c.Children[0]
 	}
 	return out
+}
+
+// numbersEqual reports whether two JSON number texts denote the same value.
+// Text that is not a JSON number compares as text.
+func numbersEqual(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ca, okA := canonicalNumber(a)
+	cb, okB := canonicalNumber(b)
+	if !okA || !okB {
+		return false
+	}
+	return ca == cb
+}
+
+// canonicalNumber rewrites a JSON number as sign, significant digits and a
+// decimal exponent (e.g. "-1.50e2" becomes "-15e1"), so equal values have
+// equal text. Zero of either sign becomes "0". It reports false for text
+// that is not a JSON number or whose exponent overflows an int.
+func canonicalNumber(s string) (string, bool) {
+	neg := false
+	if s != "" && s[0] == '-' {
+		neg = true
+		s = s[1:]
+	}
+	mant, expText, hasExp := strings.Cut(strings.ToLower(s), "e")
+	intPart, frac, _ := strings.Cut(mant, ".")
+	if intPart == "" {
+		return "", false
+	}
+	digits := intPart + frac
+	for i := range len(digits) {
+		if digits[i] < '0' || digits[i] > '9' {
+			return "", false
+		}
+	}
+	exp := 0
+	if hasExp {
+		e, err := strconv.Atoi(expText)
+		if err != nil {
+			return "", false
+		}
+		exp = e
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return "0", true
+	}
+	trimmed := strings.TrimRight(digits, "0")
+	shift := len(digits) - len(trimmed) - len(frac)
+	if (shift > 0 && exp > math.MaxInt-shift) || (shift < 0 && exp < math.MinInt-shift) {
+		return "", false
+	}
+	exp += shift
+	sign := ""
+	if neg {
+		sign = "-"
+	}
+	return sign + trimmed + "e" + strconv.Itoa(exp), true
 }

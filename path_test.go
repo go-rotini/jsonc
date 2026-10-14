@@ -280,6 +280,16 @@ func TestPathDelete(t *testing.T) {
 	if _, err := pNew.ReadFirst(root); !errors.Is(err, ErrPathNotFound) {
 		t.Error("expected b to be deleted")
 	}
+	if len(root.Children) != 2 {
+		t.Fatalf("root has %d members, want 2 (the member, key included, must be removed)", len(root.Children))
+	}
+	out, err := NodeToBytes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != `{"a": 1, "c": 3}` {
+		t.Errorf("encoded = %s, want {\"a\": 1, \"c\": 3}", out)
+	}
 	// other fields still present
 	pa, _ := PathString("$.a")
 	if v, _ := pa.ReadString(root); v != "1" {
@@ -371,6 +381,9 @@ func TestPathDeleteValueWrappedInKV(t *testing.T) {
 	verify, _ := PathString("$.a")
 	if _, err := verify.ReadFirst(root); !errors.Is(err, ErrPathNotFound) {
 		t.Error("expected $.a to be deleted")
+	}
+	if len(root.Children) != 0 {
+		t.Errorf("root has %d members, want 0", len(root.Children))
 	}
 }
 
@@ -554,5 +567,86 @@ func TestPathWildcardSkipsCommentSiblings(t *testing.T) {
 	matches := p.Read(root)
 	if len(matches) != 2 {
 		t.Errorf("expected 2 elements (comments excluded), got %d", len(matches))
+	}
+}
+
+func TestPathPointerStrictIndex(t *testing.T) {
+	f, err := Parse([]byte(`{"a":[1,2,3]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ptr := range []string{"/a/01", "/a/+1", "/a/-0"} {
+		p, err := PathPointer(ptr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := p.Read(f.Root); got != nil {
+			t.Errorf("%s matched %v", ptr, got)
+		}
+	}
+	if _, err := PathPointer("/a~2"); !errors.Is(err, ErrPointerSyntax) {
+		t.Errorf("bad escape: err = %v", err)
+	}
+}
+
+func TestReplaceKeepsElementComments(t *testing.T) {
+	f, err := Parse([]byte("[\n  // first\n  1, // one\n  2\n]"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := PathString("[0]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Replace(f.Root, &Node{Kind: NumberNode, Value: "9"}); err != nil {
+		t.Fatal(err)
+	}
+	el := f.Root.Children[0]
+	if el.Value != "9" || el.HeadComment != " first" || el.Comment != " one" {
+		t.Errorf("got %+v", el)
+	}
+	// A replacement with comments of its own keeps them.
+	if err := p.Replace(f.Root, &Node{Kind: NumberNode, Value: "8", Comment: "eight"}); err != nil {
+		t.Fatal(err)
+	}
+	if el := f.Root.Children[0]; el.Comment != "eight" || el.HeadComment != "" {
+		t.Errorf("got %+v", el)
+	}
+}
+
+func TestPathDeleteRoot(t *testing.T) {
+	f, err := Parse([]byte(`{"a":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := PathString("$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Delete(f.Root); !errors.Is(err, ErrPathSyntax) {
+		t.Errorf("err = %v, want ErrPathSyntax", err)
+	}
+	if len(f.Root.Children) != 1 {
+		t.Error("root changed")
+	}
+}
+
+func TestPathNumericNameOnEveryArray(t *testing.T) {
+	tests := []struct{ src, expr, want string }{
+		{`{"a":[[1,2],[3,4]]}`, `$.a[*].0`, "1 3"},
+		{`{"a":[{"0":"x"},[5]]}`, `$.a[*].0`, "x 5"},
+	}
+	for _, tt := range tests {
+		p, err := PathString(tt.expr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, n := range p.Read(mustParseRoot(t, tt.src)) {
+			got = append(got, n.Value)
+		}
+		if strings.Join(got, " ") != tt.want {
+			t.Errorf("%s on %s = %v, want %s", tt.expr, tt.src, got, tt.want)
+		}
 	}
 }

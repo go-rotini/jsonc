@@ -21,6 +21,8 @@ var errInvalidQuotedString = errors.New("jsonc: invalid quoted string")
 //   - \uXXXX — exactly 4 hex digits. Surrogate pairs are combined into
 //     a single rune. Lone surrogates become U+FFFD (matches stdlib).
 //
+// Each byte that is not part of valid UTF-8 also becomes U+FFFD.
+//
 // The scanner has already validated that the input is well-formed at the
 // scan level (well-formed escapes, no unescaped control characters); this
 // function performs the byte-level decode.
@@ -30,8 +32,8 @@ func unquoteString(raw string) (string, error) {
 	}
 	body := raw[1 : len(raw)-1]
 
-	// Fast path: no escapes — return as-is.
-	if !containsByte(body, '\\') {
+	// Fast path: no escapes and valid UTF-8 — return as-is.
+	if !containsByte(body, '\\') && utf8.ValidString(body) {
 		return body, nil
 	}
 
@@ -39,6 +41,17 @@ func unquoteString(raw string) (string, error) {
 	i := 0
 	for i < len(body) {
 		c := body[i]
+		if c >= utf8.RuneSelf {
+			// Invalid UTF-8 becomes U+FFFD, one per bad byte (matches stdlib).
+			r, size := utf8.DecodeRuneInString(body[i:])
+			if r == utf8.RuneError && size == 1 {
+				out = utf8.AppendRune(out, utf8.RuneError)
+			} else {
+				out = append(out, body[i:i+size]...)
+			}
+			i += size
+			continue
+		}
 		if c != '\\' {
 			out = append(out, c)
 			i++

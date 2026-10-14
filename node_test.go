@@ -1,7 +1,10 @@
 package jsonc
 
 import (
+	"bytes"
 	"errors"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -603,5 +606,219 @@ func TestEncodeASTKeyValueNodeWithoutChild(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"missing": null`) {
 		t.Errorf("expected null fallback for child-less KV, got %s", out)
+	}
+}
+
+func TestParseWarnings(t *testing.T) {
+	f, err := Parse([]byte(`{"a": 1, "a" /* k */ : // v
+2}`), WithAllowDuplicateKeys())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"line 1, column 14: comment between a key and its value is dropped",
+		"line 1, column 24: comment between a key and its value is dropped",
+		`line 1, column 10: duplicate key "a"; the last value wins`,
+	}
+	if !slices.Equal(f.Warnings, want) {
+		t.Errorf("Warnings = %q, want %q", f.Warnings, want)
+	}
+
+	clean, err := Parse([]byte(`{"a": 1} // ok`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clean.Warnings != nil {
+		t.Errorf("Warnings = %q, want nil", clean.Warnings)
+	}
+}
+
+// treeShape returns a copy of n without positions, for comparing trees
+// parsed from different text. With noComments, comments are cleared too.
+func treeShape(n *Node, noComments bool) *Node {
+	out := cloneNode(n)
+	Walk(out, func(c *Node) bool {
+		c.Pos = Position{}
+		if noComments {
+			c.Comment, c.HeadComment, c.FootComment, c.TrailComment = "", "", "", ""
+		}
+		return true
+	})
+	return out
+}
+
+func TestRootTrailCommentRoundTrip(t *testing.T) {
+	cases := []struct {
+		name      string
+		src       string
+		foot      string // root FootComment
+		trail     string // root TrailComment
+		lastClose string // the root's last token in the output
+	}{
+		{
+			name:      "object",
+			src:       "// before\n{\n  // head a\n  \"a\": 1, // line a\n  \"b\": [\n    2\n    // foot b\n  ]\n  // foot obj\n}\n// after 1\n// after 2\n",
+			foot:      " foot obj",
+			trail:     " after 1\n after 2",
+			lastClose: "}",
+		},
+		{
+			name:      "array",
+			src:       "// before\n[\n  // head 1\n  1,\n  {\"x\": true} // line x\n  // foot arr\n] // line arr\n// after\n",
+			foot:      " foot arr",
+			trail:     " after",
+			lastClose: "]",
+		},
+		{
+			name:      "empty object",
+			src:       "{\n  // only\n}\n// after\n",
+			foot:      " only",
+			trail:     " after",
+			lastClose: "}",
+		},
+		{
+			name:      "scalar",
+			src:       "// before\n42 // line\n// after\n",
+			trail:     " after",
+			lastClose: "42",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := mustParse(t, tc.src)
+			if f.Root.FootComment != tc.foot {
+				t.Errorf("FootComment = %q, want %q", f.Root.FootComment, tc.foot)
+			}
+			if f.Root.TrailComment != tc.trail {
+				t.Errorf("TrailComment = %q, want %q", f.Root.TrailComment, tc.trail)
+			}
+
+			out, err := NodeToBytesWithOptions(f.Root, WithIndent("  "))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.trail != "" && strings.LastIndex(string(out), "// after") < strings.LastIndex(string(out), tc.lastClose) {
+				t.Errorf("trail comment written before the root's end:\n%s", out)
+			}
+			again := mustParse(t, string(out))
+			if got, want := treeShape(again.Root, false), treeShape(f.Root, false); !reflect.DeepEqual(got, want) {
+				t.Errorf("tree changed through NodeToBytesWithOptions:\n%s", out)
+			}
+
+			compact, err := NodeToBytes(f.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := treeShape(mustParse(t, string(compact)).Root, true), treeShape(f.Root, true); !reflect.DeepEqual(got, want) {
+				t.Errorf("tree changed through NodeToBytes: %s", compact)
+			}
+
+			formatted, err := Format([]byte(tc.src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(formatted, out) {
+				t.Errorf("Format and NodeToBytesWithOptions differ:\n%s\n---\n%s", formatted, out)
+			}
+			twice, err := Format(formatted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(twice, formatted) {
+				t.Errorf("Format not stable:\n%s\n---\n%s", formatted, twice)
+			}
+		})
+	}
+}
+
+func TestBuiltTrailComment(t *testing.T) {
+	root := &Node{Kind: ObjectNode, TrailComment: "after root", Children: []*Node{
+		{Kind: KeyValueNode, Key: "a", Children: []*Node{
+			{Kind: ArrayNode, FootComment: "in a", TrailComment: "after a"},
+		}},
+		{Kind: KeyValueNode, Key: "b", TrailComment: "after b", Children: []*Node{
+			{Kind: NumberNode, Value: "1"},
+		}},
+	}}
+	out, err := NodeToBytesWithOptions(root, WithIndent("  "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\n  \"a\": [\n    // in a\n  ],\n  // after a\n  \"b\": 1\n  // after b\n}\n// after root\n"
+	if string(out) != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+func TestNodeToBytesKeepsKeys(t *testing.T) {
+	f, err := Parse([]byte(`{"café": 1, "\ud800": 2, "a\/b": "x\/y"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NodeToBytes(f.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"café": 1, "\ud800": 2, "a\/b": "x\/y"}`; string(out) != want {
+		t.Errorf("got %s, want %s", out, want)
+	}
+
+	f.Root.Children[2].Key = "c/d"
+	out, err = NodeToBytes(cloneNode(f.Root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"café": 1, "\ud800": 2, "c/d": "x\/y"}`; string(out) != want {
+		t.Errorf("renamed: got %s, want %s", out, want)
+	}
+}
+
+func TestNodeRawKey(t *testing.T) {
+	f, err := Parse([]byte(`{"a": 1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := f.Root.Children[0]
+	if member.Key != "a" || member.RawKey != `"a"` {
+		t.Fatalf("Key, RawKey = %q, %q", member.Key, member.RawKey)
+	}
+	if out, _ := NodeToBytes(f.Root); string(out) != `{"a": 1}` {
+		t.Errorf("unchanged key: %s", out)
+	}
+	member.Key = "b"
+	if out, _ := NodeToBytes(f.Root); string(out) != `{"b": 1}` {
+		t.Errorf("renamed key: %s", out)
+	}
+
+	// A RawKey that is not one plain string token is dropped, even when it
+	// unquotes to Key.
+	for _, c := range []struct{ key, raw, want string }{
+		{`a": 1, "evil": 2, "b`, `"a": 1, "evil": 2, "b"`, `{"a\": 1, \"evil\": 2, \"b": 1}`},
+		{"a\nb", "\"a\nb\"", `{"a\nb": 1}`},
+		{"x", `"\u0078"`, `{"\u0078": 1}`},
+	} {
+		member.Key, member.RawKey = c.key, c.raw
+		if out, err := NodeToBytes(f.Root); err != nil || string(out) != c.want {
+			t.Errorf("RawKey %q: %s, %v; want %s", c.raw, out, err, c.want)
+		}
+	}
+
+	// Every field is exported, so a parsed member equals a hand-built one
+	// once its source fields are cleared.
+	g, err := Parse([]byte(`{"a": 1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := g.Root.Children[0]
+	m.Pos, m.RawKey, m.Children[0].Pos, m.Children[0].RawValue = Position{}, "", Position{}, ""
+	want := &Node{Kind: KeyValueNode, Key: "a", Children: []*Node{{Kind: NumberNode, Value: "1"}}}
+	if !reflect.DeepEqual(m, want) {
+		t.Errorf("member = %#v, want %#v", m, want)
+	}
+	nt := reflect.TypeFor[Node]()
+	for i := range nt.NumField() {
+		if !nt.Field(i).IsExported() {
+			t.Errorf("Node.%s is unexported", nt.Field(i).Name)
+		}
 	}
 }

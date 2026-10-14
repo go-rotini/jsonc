@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/big"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -135,6 +136,28 @@ func TestEncodeStringHTMLOptIn(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "\\u003c") {
 		t.Errorf("expected \\u003c in output, got %q", out)
+	}
+}
+
+func TestEncodeStringHTMLLineSeparators(t *testing.T) {
+	in := "a b c<"
+	want, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := MarshalWithOptions(in, WithEscapeHTML(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("got %s, want %s (encoding/json)", got, want)
+	}
+	raw, err := Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "\"a b c<\"" {
+		t.Errorf("without WithEscapeHTML got %q, want separators unescaped", raw)
 	}
 }
 
@@ -308,6 +331,28 @@ func TestEncodeStructOmitZero(t *testing.T) {
 	}
 	if string(out) != `{"a": 5}` {
 		t.Errorf("got %q", out)
+	}
+}
+
+type alwaysZero struct{ N int }
+
+func (alwaysZero) IsZero() bool { return true }
+
+type jsonOmitZeroStruct struct {
+	A int        `json:"a,omitzero"`
+	B int        `json:"b,omitzero"`
+	T time.Time  `json:"t,omitzero"`
+	Z alwaysZero `json:"z,omitzero"`
+	P *int       `json:"p,omitzero"`
+}
+
+func TestEncodeStructOmitZeroJSONTag(t *testing.T) {
+	out, err := Marshal(jsonOmitZeroStruct{A: 5, Z: alwaysZero{N: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != `{"a": 5}` {
+		t.Errorf("got %s, want {\"a\": 5}", out)
 	}
 }
 
@@ -508,7 +553,7 @@ func TestEncodeRawMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(out) != `{"x":1}` {
+	if string(out) != `{"x": 1}` {
 		t.Errorf("got %q", out)
 	}
 }
@@ -569,6 +614,66 @@ func TestEncodeStdlibMarshaler(t *testing.T) {
 	}
 	if string(out) != `"std:y"` {
 		t.Errorf("got %q", out)
+	}
+}
+
+type rawJSON string
+
+func (r rawJSON) MarshalJSON() ([]byte, error) { return []byte(r), nil }
+
+type rawJSONC string
+
+func (r rawJSONC) MarshalJSONC() ([]byte, error) { return []byte(r), nil }
+
+func TestMarshalerOutputValidated(t *testing.T) {
+	bad := []struct {
+		name string
+		v    any
+		opts []EncodeOption
+	}{
+		{"RawMessage unterminated", json.RawMessage(`{bad`), nil},
+		{"RawMessage two values", json.RawMessage(`1 2`), nil},
+		{"RawMessage comment", json.RawMessage(`1 // c`), nil},
+		{"MarshalJSON injection", map[string]rawJSON{"x": `"a"}, "admin": true, "y": {"z"`}, nil},
+		{"MarshalJSON injection strict", map[string]rawJSON{"x": `"a"}, "admin": true, "y": {"z"`}, []EncodeOption{WithStrictJSONOutput(true)}},
+		{"MarshalJSON empty", rawJSON(""), nil},
+		{"MarshalJSON trailing comma", rawJSON(`[1,]`), nil},
+		{"MarshalJSONC two values", rawJSONC(`1 2`), nil},
+		{"RawValue unterminated", RawValue(`{"a":`), nil},
+		{"custom marshaler", 1, []EncodeOption{WithCustomMarshaler(func(int) ([]byte, error) { return []byte(`}`), nil })}},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := MarshalWithOptions(tt.v, tt.opts...)
+			if err == nil {
+				t.Fatalf("got %s, want error", out)
+			}
+		})
+	}
+
+	good := []struct {
+		name string
+		v    any
+		opts []EncodeOption
+		want string
+	}{
+		{"MarshalJSON re-indented", struct{ A rawJSON }{`{"b":[1,2]}`}, []EncodeOption{WithIndent("  ")},
+			"{\n  \"A\": {\n    \"b\": [\n      1,\n      2\n    ]\n  }\n}"},
+		{"MarshalJSONC comment kept", struct{ A rawJSONC }{"{\"b\": 1, // c\n}"}, []EncodeOption{WithIndent("  ")},
+			"{\n  \"A\": {\n    \"b\": 1 // c\n  }\n}"},
+		{"MarshalJSONC strict output", struct{ A rawJSONC }{"[1, /* c */ 2,]"}, []EncodeOption{WithStrictJSONOutput(true)},
+			`{"A": [1, 2]}`},
+		{"RawValue verbatim", struct{ A RawValue }{RawValue("[1, /* c */ 2,]")}, nil,
+			`{"A": [1, /* c */ 2,]}`},
+		{"number text kept", rawJSON(`1.50e+2`), nil, `1.50e+2`},
+	}
+	for _, tt := range good {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := MarshalWithOptions(tt.v, tt.opts...)
+			if err != nil || string(out) != tt.want {
+				t.Errorf("got %q, %v; want %q", out, err, tt.want)
+			}
+		})
 	}
 }
 
@@ -1348,8 +1453,54 @@ func TestEncodeCommentedTag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "/* 2 */") {
-		t.Errorf("expected commented form for B, got:\n%s", out)
+	want := "{\n  \"a\": 1\n  /* \"b\": 2 */\n}"
+	if string(out) != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// TestEncodeCommentedTagRoundTrip checks that output with commented
+// members decodes again, with those members absent.
+func TestEncodeCommentedTagRoundTrip(t *testing.T) {
+	type Inner struct {
+		X string `json:"x"`
+	}
+	type S struct {
+		A int    `json:"a" jsonc:",commented"`
+		B int    `json:"b"`
+		C Inner  `json:"c" jsonc:",commented" comment:"about c"`
+		D string `json:"d" jsonc:",commented"`
+	}
+	in := S{A: 1, B: 2, C: Inner{X: "has */ inside"}, D: "last"}
+	for _, opts := range [][]EncodeOption{
+		{WithIndent("  ")},
+		{WithIndent("  "), WithTrailingComma(true)},
+	} {
+		out, err := MarshalWithOptions(in, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got S
+		if err := Unmarshal(out, &got); err != nil {
+			t.Fatalf("output does not decode: %v\n%s", err, out)
+		}
+		if got != (S{B: 2}) {
+			t.Errorf("decoded %+v, want only B set\n%s", got, out)
+		}
+		if !strings.Contains(string(out), "// about c") {
+			t.Errorf("head comment missing:\n%s", out)
+		}
+	}
+
+	type All struct {
+		A int `json:"a" jsonc:",commented"`
+	}
+	out, err := MarshalWithOptions(All{A: 1}, WithIndent("  "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Unmarshal(out, &All{}); err != nil {
+		t.Errorf("all-commented output does not decode: %v\n%s", err, out)
 	}
 }
 
@@ -1505,18 +1656,18 @@ func TestEncodeMarshalerOnPointerReceiver(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEncodeMapWithInsertionOrder(t *testing.T) {
-	// With native map[K]V the insertion order option leaves the
-	// reflect.MapKeys order alone; we just verify the option is read
-	// without producing an error and the output is parseable.
-	out, err := MarshalWithOptions(
-		map[string]int{"a": 1, "b": 2, "c": 3},
-		WithMapKeyOrder(MapKeyOrderInsertion),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Parse(out); err != nil {
-		t.Errorf("not re-parseable: %v\nout=%s", err, out)
+	// A native map has no insertion order, so the encoder falls back to
+	// lexicographic order. Repeat to catch randomized map iteration.
+	m := map[string]int{"e": 5, "c": 3, "a": 1, "d": 4, "b": 2, "f": 6, "h": 8, "g": 7}
+	for range 20 {
+		out, err := MarshalWithOptions(m, WithMapKeyOrder(MapKeyOrderInsertion))
+		if err != nil {
+			t.Fatal(err)
+		}
+		const want = `{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8}`
+		if string(out) != want {
+			t.Fatalf("got %s, want %s", out, want)
+		}
 	}
 }
 
@@ -1865,5 +2016,200 @@ func TestRoundTripArrayOfStructs(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].Name != "a" || got[1].Tags[1] != 4 {
 		t.Errorf("round trip: %+v", got)
+	}
+}
+
+type valueMarshaler struct{ N int }
+
+func (v valueMarshaler) MarshalJSON() ([]byte, error) { return []byte(strconv.Itoa(v.N)), nil }
+
+type readingMarshaler struct{ N int }
+
+func (m *readingMarshaler) MarshalJSON() ([]byte, error) { return []byte(strconv.Itoa(m.N)), nil }
+
+type nilPtrMarshaler struct{}
+
+func (p *nilPtrMarshaler) MarshalJSONC() ([]byte, error) {
+	if p == nil {
+		return []byte(`"nil receiver"`), nil
+	}
+	return []byte(`"set"`), nil
+}
+
+func TestNilPtrMarshaler(t *testing.T) {
+	var vr *valueMarshaler
+	tests := []struct {
+		name string
+		v    any
+		want string
+	}{
+		{"nil *time.Time field", struct{ T *time.Time }{}, `{"T": null}`},
+		{"nil value-receiver pointer", struct{ V *valueMarshaler }{}, `{"V": null}`},
+		{"nil value-receiver in any", struct{ V any }{vr}, `{"V": null}`},
+		{"nil pointer receiver is not called", struct{ P *nilPtrMarshaler }{}, `{"P": null}`},
+		{"nil *regexp.Regexp field", struct{ M *regexp.Regexp }{}, `{"M": null}`},
+		{"nil reading pointer receiver", struct{ M *readingMarshaler }{}, `{"M": null}`},
+		{"nil map value", map[string]*readingMarshaler{"a": nil}, `{"a": null}`},
+		{"nil slice element", []*readingMarshaler{nil, {N: 2}}, `[null, 2]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Marshal(tt.v)
+			if err != nil || string(got) != tt.want {
+				t.Errorf("got %s, %v; want %s", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestUnexportedEmbeddedEncode(t *testing.T) {
+	v := struct {
+		unexportedInt
+		A int
+	}{5, 1}
+	got, err := Marshal(v)
+	if err != nil || string(got) != `{"A": 1}` {
+		t.Errorf("got %s, %v", got, err)
+	}
+}
+
+func TestMarshalCyclicMapAndSlice(t *testing.T) {
+	m := map[string]any{}
+	m["self"] = m
+	if _, err := Marshal(m); !errors.Is(err, ErrUnsupportedValue) {
+		t.Errorf("map: err = %v, want ErrUnsupportedValue", err)
+	}
+	s := []any{nil}
+	s[0] = s
+	if _, err := Marshal(s); !errors.Is(err, ErrUnsupportedValue) {
+		t.Errorf("slice: err = %v, want ErrUnsupportedValue", err)
+	}
+	ms := MapSlice{{Key: "a"}}
+	ms[0].Value = ms
+	if _, err := Marshal(ms); !errors.Is(err, ErrUnsupportedValue) {
+		t.Errorf("MapSlice: err = %v, want ErrUnsupportedValue", err)
+	}
+	// Deep but acyclic nesting still encodes.
+	var deep any = "x"
+	for range 1500 {
+		deep = []any{deep}
+	}
+	if _, err := Marshal(deep); err != nil {
+		t.Errorf("deep acyclic: %v", err)
+	}
+}
+
+func TestNestedMapSliceIndent(t *testing.T) {
+	v := map[string]any{"outer": map[string]any{"ms": MapSlice{{Key: "a", Value: 1}, {Key: "b", Value: map[string]int{"c": 2}}}}}
+	got, err := MarshalIndent(v, "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{
+  "outer": {
+    "ms": {
+      "a": 1,
+      "b": {
+        "c": 2
+      }
+    }
+  }
+}`
+	if string(got) != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestMarshalInvalidUTF8(t *testing.T) {
+	got, err := Marshal("a\xffb")
+	if err != nil || string(got) != `"a�b"` {
+		t.Errorf("got %s, %v", got, err)
+	}
+	got, err = Marshal("é€😀")
+	if err != nil || string(got) != `"é€😀"` {
+		t.Errorf("valid multi-byte: got %s, %v", got, err)
+	}
+}
+
+func TestMarshalInvalidNumber(t *testing.T) {
+	for _, n := range []json.Number{"abc", "01", "1.", "+1", "1e"} {
+		if got, err := Marshal(n); !errors.Is(err, ErrUnsupportedValue) {
+			t.Errorf("Marshal(%q) = %s, %v; want ErrUnsupportedValue", n, got, err)
+		}
+	}
+	for _, n := range []json.Number{"0", "-1.5e10", "123"} {
+		if got, err := Marshal(n); err != nil || string(got) != string(n) {
+			t.Errorf("Marshal(%q) = %s, %v", n, got, err)
+		}
+	}
+}
+
+func TestCommentPathBracketsDottedKeys(t *testing.T) {
+	v := map[string]any{
+		"a.b": 1,
+		"a":   map[string]int{"b": 2},
+	}
+	got, err := MarshalWithOptions(v, WithIndent("  "), WithComment(map[string][]Comment{
+		`["a.b"]`: {{Position: LineCommentPos, Text: "dotted"}},
+		"a.b":     {{Position: LineCommentPos, Text: "nested"}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(got)
+	if !strings.Contains(out, `"a.b": 1 // dotted`) || !strings.Contains(out, `"b": 2 // nested`) ||
+		strings.Count(out, "//") != 2 {
+		t.Errorf("got\n%s", out)
+	}
+}
+
+func TestRawValueTrailingLineComment(t *testing.T) {
+	type S struct {
+		A RawValue `json:"a"`
+		B int      `json:"b"`
+	}
+	v := S{A: RawValue("  1 /* x */ // note"), B: 2}
+	for _, opts := range [][]EncodeOption{nil, {WithIndent("  ")}} {
+		out, err := MarshalWithOptions(v, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !Valid(out) || !strings.Contains(string(out), `"a": 1,`) {
+			t.Errorf("%q", out)
+		}
+	}
+	out, err := Marshal(S{A: RawValue("\n{\"x\": 1} /* kept */\n"), B: 2})
+	if err != nil || string(out) != `{"a": {"x": 1} /* kept */, "b": 2}` {
+		t.Errorf("block comment: %q, %v", out, err)
+	}
+}
+
+type htmlMarshaler struct{}
+
+func (htmlMarshaler) MarshalJSON() ([]byte, error) { return []byte(`{"<k>":"<b>&amp; "}`), nil }
+
+func TestEscapeHTMLInMarshalerOutput(t *testing.T) {
+	v := map[string]any{"m": htmlMarshaler{}, "r": json.RawMessage(`"<"`)}
+	out, err := MarshalWithOptions(v, WithEscapeHTML(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.ContainsAny(out, "<>&") {
+		t.Errorf("WithEscapeHTML left HTML characters: %s", out)
+	}
+	if out, _ := Marshal(v); !strings.Contains(string(out), `"<b>&amp; "`) {
+		t.Errorf("without WithEscapeHTML the source text is kept: %s", out)
+	}
+}
+
+type bomMarshaler struct{}
+
+func (bomMarshaler) MarshalJSON() ([]byte, error) { return []byte("\xef\xbb\xbf1"), nil }
+
+func TestMarshalerOutputErrors(t *testing.T) {
+	_, err := Marshal(bomMarshaler{})
+	if err == nil || !strings.Contains(err.Error(), "byte order mark") ||
+		!strings.Contains(err.Error(), "within that output") {
+		t.Errorf("err = %v", err)
 	}
 }

@@ -167,8 +167,45 @@ func TestPatchTestSucceeds(t *testing.T) {
 func TestPatchTestFails(t *testing.T) {
 	root := mustParseRoot(t, `{"a": 1}`)
 	p, _ := ParsePatch([]byte(`[{"op": "test", "path": "/a", "value": 99}]`))
-	if _, err := p.Apply(root); !errors.Is(err, ErrPatchSyntax) {
-		t.Errorf("expected ErrPatchSyntax (test failed), got %v", err)
+	_, err := p.Apply(root)
+	if !errors.Is(err, ErrPatchTestFailed) {
+		t.Errorf("expected ErrPatchTestFailed, got %v", err)
+	}
+	if !errors.Is(err, ErrPatchSyntax) {
+		t.Errorf("a failed test should also match ErrPatchSyntax, got %v", err)
+	}
+}
+
+func TestPatchTestComparesNumbersByValue(t *testing.T) {
+	root := mustParseRoot(t, `{"a": 1, "b": [100], "c": -0, "d": 0.5}`)
+	for _, tc := range []struct {
+		path, value string
+		want        bool
+	}{
+		{"/a", "1.0", true},
+		{"/a", "1e0", true},
+		{"/a", "10E-1", true},
+		{"/a", "1.5", false},
+		{"/b/0", "1e2", true},
+		{"/b/0", "0.1e3", true},
+		{"/b/0", "1e3", false},
+		{"/c", "0", true},
+		{"/c", "0.0e5", true},
+		{"/d", "5e-1", true},
+		{"/d", "-0.5", false},
+		{"/a", `"1"`, false},
+	} {
+		p, err := ParsePatch([]byte(`[{"op": "test", "path": "` + tc.path + `", "value": ` + tc.value + `}]`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = p.Apply(root)
+		if got := err == nil; got != tc.want {
+			t.Errorf("test %s == %s: passed=%v, want %v (err %v)", tc.path, tc.value, got, tc.want, err)
+		}
+		if err != nil && !errors.Is(err, ErrPatchTestFailed) {
+			t.Errorf("test %s == %s: err = %v, want ErrPatchTestFailed", tc.path, tc.value, err)
+		}
 	}
 }
 
@@ -414,5 +451,125 @@ func TestParsePatchInvalidValue(t *testing.T) {
 	_, err := ParsePatch([]byte(src))
 	if err == nil {
 		t.Error("expected ErrPatchSyntax on malformed value")
+	}
+}
+
+func applyPatch(t *testing.T, doc, patch string) (string, error) {
+	t.Helper()
+	f, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := ParsePatch([]byte(patch))
+	if err != nil {
+		return "", err
+	}
+	out, err := p.Apply(f.Root)
+	if err != nil {
+		return "", err
+	}
+	b, err := NodeToBytes(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b), nil
+}
+
+func TestPatchReplaceArray(t *testing.T) {
+	got, err := applyPatch(t, `{"a":[1,2,3]}`, `[{"op":"replace","path":"/a/0","value":9}]`)
+	if err != nil || got != `{"a": [9, 2, 3]}` {
+		t.Errorf("got %s, %v", got, err)
+	}
+	if _, err := applyPatch(t, `{"a":[1]}`, `[{"op":"replace","path":"/a/1","value":9}]`); !errors.Is(err, ErrPathNotFound) {
+		t.Errorf("replace past end: err = %v", err)
+	}
+}
+
+func TestPatchReplaceArrayKeepsComments(t *testing.T) {
+	f, err := Parse([]byte("[\n  // first\n  1, // one\n  2\n]"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Patch{{Op: "replace", Path: "/0", Value: &Node{Kind: NumberNode, Value: "9"}}}.Apply(f.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Children[0].HeadComment != " first" || out.Children[0].Comment != " one" {
+		t.Errorf("comments = %q, %q", out.Children[0].HeadComment, out.Children[0].Comment)
+	}
+}
+
+func TestPatchPointerIndex(t *testing.T) {
+	for _, path := range []string{"/a/01", "/a/+1", "/a/-0", "/a/ 1", "/a/1x"} {
+		if _, err := applyPatch(t, `{"a":[1,2,3]}`, `[{"op":"remove","path":"`+path+`"}]`); err == nil {
+			t.Errorf("remove %s: no error", path)
+		}
+	}
+	for _, path := range []string{"/a~2", "/a~", "/~x"} {
+		if _, err := applyPatch(t, `{"a":1}`, `[{"op":"remove","path":"`+path+`"}]`); !errors.Is(err, ErrPointerSyntax) {
+			t.Errorf("remove %s: err = %v, want ErrPointerSyntax", path, err)
+		}
+	}
+	got, err := applyPatch(t, `{"a~/b":[1,2,3]}`, `[{"op":"remove","path":"/a~0~1b/1"}]`)
+	if err != nil || got != `{"a~/b": [1, 3]}` {
+		t.Errorf("escaped remove: got %s, %v", got, err)
+	}
+}
+
+func TestPatchMissingPath(t *testing.T) {
+	for _, patch := range []string{
+		`[{"op":"add","value":{"pwned":true}}]`,
+		`[{"op":"move","path":"/b"}]`,
+		`[{"op":"copy","path":"/b"}]`,
+	} {
+		if _, err := ParsePatch([]byte(patch)); !errors.Is(err, ErrPatchSyntax) {
+			t.Errorf("%s: err = %v, want ErrPatchSyntax", patch, err)
+		}
+	}
+	if _, err := applyPatch(t, `{"a":1}`, `[{"op":"move","from":"/nope","path":"/nope"}]`); !errors.Is(err, ErrPathNotFound) {
+		t.Errorf("move missing onto itself: err = %v", err)
+	}
+	got, err := applyPatch(t, `{"a":1}`, `[{"op":"move","from":"/a","path":"/a"}]`)
+	if err != nil || got != `{"a": 1}` {
+		t.Errorf("move onto itself: got %s, %v", got, err)
+	}
+}
+
+func TestPatchNilRoot(t *testing.T) {
+	n := &Node{Kind: NumberNode, Value: "1"}
+	for _, op := range []PatchOp{
+		{Op: "add", Path: "/a", Value: n},
+		{Op: "add", Path: "/a/b", Value: n},
+		{Op: "remove", Path: "/a"},
+		{Op: "replace", Path: "/a", Value: n},
+		{Op: "move", From: "/a", Path: "/b"},
+		{Op: "copy", From: "/a", Path: "/b"},
+		{Op: "test", Path: "/a", Value: n},
+	} {
+		if _, err := (Patch{op}).Apply(nil); !errors.Is(err, ErrPathNotFound) {
+			t.Errorf("%s: err = %v, want ErrPathNotFound", op.Op, err)
+		}
+	}
+	out, err := Patch{{Op: "add", Path: "", Value: n}}.Apply(nil)
+	if err != nil || out.Value != "1" {
+		t.Errorf("add at root: %v, %v", out, err)
+	}
+}
+
+func TestPatchMoveKeepsMemberComments(t *testing.T) {
+	f, err := Parse([]byte("{\n  // about a\n  \"a\": 1, // one\n  \"b\": 2\n}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Patch{{Op: "move", From: "/a", Path: "/c"}}.Apply(f.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := NodeToBytesWithOptions(out, WithIndent("  "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "// about a\n  \"c\": 1 // one") {
+		t.Errorf("got\n%s", got)
 	}
 }

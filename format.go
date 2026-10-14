@@ -1,11 +1,9 @@
 package jsonc
 
-// ToJSON converts JSONC input to standard RFC 8259 JSON by removing
-// comments and trailing commas. The structure and values are preserved
-// unchanged; only the JSONC extensions are stripped.
+// ToJSON converts JSONC input to compact RFC 8259 JSON by removing
+// comments and trailing commas. Values keep their source text.
 //
-// This is the most common conversion when piping JSONC into stdlib
-// [encoding/json.Unmarshal]:
+// Use it to feed JSONC to [encoding/json.Unmarshal]:
 //
 //	std, err := jsonc.ToJSON(data)
 //	if err != nil { return err }
@@ -21,20 +19,18 @@ func ToJSON(data []byte) ([]byte, error) {
 	return enc.encodeNode(root)
 }
 
-// StripComments is an alias for [ToJSON]. Provided for discoverability —
-// callers searching for "strip comments from JSON" find it readily.
+// StripComments is an alias for [ToJSON].
 func StripComments(data []byte) ([]byte, error) {
 	return ToJSON(data)
 }
 
-// Format pretty-prints JSONC input. Comments and trailing commas are
-// preserved; the output uses two-space indentation by default. Pass
-// additional [EncodeOption] values to customize the output (e.g.,
-// [WithIndent], [WithIndentN], [WithTrailingComma]).
+// Format pretty-prints JSONC input with two-space indentation, keeping
+// comments. Trailing commas in the input are not kept; pass
+// [WithTrailingComma] to add them. Other [EncodeOption] values, such as
+// [WithIndent] or [WithIndentN], customize the output.
 //
-// Format is a whole-document transformation: the input must be a single
-// JSONC value (with optional surrounding whitespace and comments). To
-// produce strict RFC 8259 JSON, use [ToJSON] instead.
+// The input must be a single JSONC value, optionally surrounded by
+// whitespace and comments. To produce strict RFC 8259 JSON, use [ToJSON].
 func Format(data []byte, opts ...EncodeOption) ([]byte, error) {
 	root, err := parseDocument(data, defaultDecodeOptions())
 	if err != nil {
@@ -49,10 +45,9 @@ func Format(data []byte, opts ...EncodeOption) ([]byte, error) {
 	return enc.encodeNode(root)
 }
 
-// Minimize compacts JSONC input by removing redundant whitespace.
-// Comments are preserved by default; pass [WithStrictJSONOutput](true)
-// (equivalent to using [ToJSON]) to drop them. Trailing commas are dropped
-// in compact output regardless.
+// Minimize compacts JSONC input onto a single line. Comments and trailing
+// commas are dropped, since compact output has nowhere to put them, so the
+// result is RFC 8259 JSON. Members are separated by ", " and keys by ": ".
 func Minimize(data []byte, opts ...EncodeOption) ([]byte, error) {
 	root, err := parseDocument(data, defaultDecodeOptions())
 	if err != nil {

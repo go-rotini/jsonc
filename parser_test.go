@@ -199,10 +199,13 @@ func TestParseHeadComment(t *testing.T) {
 func TestParseInlineComment(t *testing.T) {
 	src := `42 // inline`
 	f := mustParse(t, src)
-	if !strings.Contains(f.Root.FootComment, "inline") {
-		// Trailing comment after a top-level value is captured as foot
-		// (no following content).
-		t.Errorf("FootComment = %q, want contains 'inline'", f.Root.FootComment)
+	// A same-line comment after a scalar root is its line comment, as for
+	// a container root.
+	if f.Root.Comment != " inline" {
+		t.Errorf("Comment = %q, want %q", f.Root.Comment, " inline")
+	}
+	if f.Root.FootComment != "" {
+		t.Errorf("FootComment = %q, want empty", f.Root.FootComment)
 	}
 }
 
@@ -342,6 +345,27 @@ func TestParseMaxDepth(t *testing.T) {
 	_, err := Parse([]byte(src), WithMaxDepth(10))
 	if err == nil {
 		t.Error("expected max-depth error")
+	}
+}
+
+func TestMaxDepthCountsContainers(t *testing.T) {
+	wrap := func(open, closing string, n int) []byte {
+		return []byte(strings.Repeat(open, n) + "1" + strings.Repeat(closing, n))
+	}
+	if !Valid(wrap("[", "]", 100)) || !Valid(wrap(`{"a":`, "}", 100)) {
+		t.Error("a scalar inside 100 containers should be accepted by default")
+	}
+	if Valid(wrap("[", "]", 101)) {
+		t.Error("101 containers should be rejected by default")
+	}
+	if _, err := Parse([]byte(`1`), WithMaxDepth(1)); err != nil {
+		t.Errorf("scalar root at max depth 1: %v", err)
+	}
+	if _, err := Parse([]byte(`[1]`), WithMaxDepth(1)); err != nil {
+		t.Errorf("[1] at max depth 1: %v", err)
+	}
+	if _, err := Parse([]byte(`[[1]]`), WithMaxDepth(1)); err == nil {
+		t.Error("[[1]] at max depth 1: want error")
 	}
 }
 
