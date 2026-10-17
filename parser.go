@@ -542,18 +542,24 @@ func (p *parser) warnf(pos Position, format string, args ...any) {
 }
 
 // consumeTrailing handles tokens after the root value. Whitespace, newlines,
-// and comments are accepted. Comments are appended to the root's trail
-// comment. Any other token triggers an "extra data after value" error.
+// and comments are accepted. Comments are joined as in
+// [collectHeadComments], blank lines included, and appended to the root's
+// trail comment. Any other token triggers an "extra data after value" error.
 func (p *parser) consumeTrailing(root *node) error {
+	var sb strings.Builder
 	for {
 		tk := p.peek()
 		switch tk.kind {
 		case tokenEOF, tokenStreamEnd:
+			root.trailComment = appendCommentBlock(root.trailComment, nonBlank(sb.String()))
 			return nil
 		case tokenNewline:
 			p.bump()
 		case tokenLineComment, tokenBlockComment:
-			root.trailComment = appendCommentBlock(root.trailComment, nonBlank(tk.value))
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(tk.value)
 			p.bump()
 		default:
 			return &SyntaxError{

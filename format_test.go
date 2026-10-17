@@ -213,6 +213,26 @@ func TestFormatCommentPlacement(t *testing.T) {
 			in:   "// top\n1 // same line\n// after\n",
 			want: "// top\n1 // same line\n// after\n",
 		},
+		{
+			name: "trailing multi-line block comment with CR breaks",
+			in:   "0\r/*a\rb\r*/",
+			want: "0\n// a\n// b\n//\n",
+		},
+		{
+			name: "trailing multi-line block comment with LF breaks",
+			in:   "{}\n/*a\n\nb\n*/",
+			want: "{}\n// a\n//\n// b\n//\n",
+		},
+		{
+			name: "trailing multi-line block comment with CRLF breaks",
+			in:   "[1]\r\n/*a\r\nb\r\n*/",
+			want: "[\n  1\n]\n// a\n// b\n//\n",
+		},
+		{
+			name: "trailing comment keeps blank lines",
+			in:   "0\n// a\n//\n// b\n",
+			want: "0\n// a\n//\n// b\n",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
