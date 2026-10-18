@@ -499,12 +499,12 @@ func (d *decoder) decodeObjectToStruct(n *node, rv reflect.Value) error {
 				Pos:     n.pos,
 			}
 		}
-		if fi.hasDefault && d.opts.applyDefaults {
+		if fi.hasDefault && d.opts.applyDefault != nil {
 			fv, err := fieldByIndexAlloc(rv, fi.index)
 			if err != nil {
 				return err
 			}
-			if err := applyDefault(fi, fv); err != nil {
+			if err := d.opts.applyDefault(fi, fv); err != nil {
 				if de, ok := errors.AsType[*DefaultError](err); ok {
 					de.Pos = n.pos
 				}

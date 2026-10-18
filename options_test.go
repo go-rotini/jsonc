@@ -59,7 +59,7 @@ func TestDecodeOptionsDefaults(t *testing.T) {
 	if o.useOrderedMap {
 		t.Error("default useOrderedMap = true, want false")
 	}
-	if o.applyDefaults {
+	if o.applyDefault != nil {
 		t.Error("default applyDefaults = true, want false")
 	}
 	if o.maxKeys != 0 || o.maxDocumentSize != 0 || o.maxNodes != 0 {
@@ -161,7 +161,7 @@ func TestDecodeOptionApplication(t *testing.T) {
 		t.Error("WithOrderedMap() failed")
 	}
 	WithDefaults()(o)
-	if !o.applyDefaults {
+	if !(o.applyDefault != nil) {
 		t.Error("WithDefaults() failed")
 	}
 	WithMaxDepth(50)(o)

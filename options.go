@@ -173,7 +173,7 @@ type decoderOptions struct {
 	allowDuplicateKeys bool
 	useNumber          bool
 	useOrderedMap      bool
-	applyDefaults      bool
+	applyDefault       func(fieldInfo, reflect.Value) error // set by WithDefaults; nil leaves default tags unread and unlinked
 	maxDepth           int
 	maxKeys            int
 	maxDocumentSize    int
@@ -231,7 +231,7 @@ func WithOrderedMap() DecodeOption {
 // ignored. Only scalar types are supported: string, bool, int/uint
 // variants, float variants, and time.Duration.
 func WithDefaults() DecodeOption {
-	return func(o *decoderOptions) { o.applyDefaults = true }
+	return func(o *decoderOptions) { o.applyDefault = applyDefault }
 }
 
 // WithMaxDepth limits how deeply objects and arrays may nest (default
