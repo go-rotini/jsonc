@@ -493,11 +493,11 @@ func (p *parser) collectTrailingInlineComment() string {
 	return nonBlank(tk.value)
 }
 
-// nonBlank returns text, or "" when text is only whitespace. An empty or
-// blank comment carries nothing, and the AST cannot tell an empty comment
-// from none, so blank comments are dropped.
+// nonBlank returns text, or "" when text is only blanks. An empty or blank
+// comment carries nothing, and the AST cannot tell an empty comment from
+// none, so blank comments are dropped.
 func nonBlank(text string) string {
-	if strings.TrimSpace(text) == "" {
+	if isBlank(text) {
 		return ""
 	}
 	return text
@@ -642,4 +642,11 @@ func appendCommentBlock(existing, addition string) string {
 	default:
 		return existing + "\n" + addition
 	}
+}
+
+// isBlank reports whether text holds only spaces, tabs and line breaks: the
+// characters the formatter drops or rewrites. Other whitespace, such as
+// U+0085, is comment text and is kept.
+func isBlank(text string) bool {
+	return strings.Trim(text, " \t\r\n") == ""
 }

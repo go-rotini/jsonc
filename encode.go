@@ -397,7 +397,7 @@ func (e *encoder) writeIndent(depth int) {
 func (e *encoder) writeCommentBlock(text string, depth int) {
 	started := false
 	for line := range strings.SplitSeq(normalizeLineEndings(text), "\n") {
-		if !started && strings.TrimSpace(line) == "" {
+		if !started && isBlank(line) {
 			continue
 		}
 		started = true
